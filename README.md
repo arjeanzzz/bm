@@ -9,18 +9,23 @@ around `keepassxc-cli`.
 1. Install KeePassXC into `/Applications`: `brew install --cask keepassxc`. `bm` runs
    `/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli`, never one from `PATH`.
 2. Build the Touch ID helper as your user: `make`.
-3. Copy `bm` and the helper into `/usr/local/bin`, owned by root: `sudo make install-system`.
-   Programs that run as your user cannot change these copies. For another place use
-   `sudo make install-system PREFIX=/opt/bm`. Its `bin` folder must be owned by root and
-   writable only by root, otherwise `make` refuses it (on Intel Macs Homebrew often owns
-   `/usr/local/bin`).
-4. Make sure no other `bm` comes earlier in `PATH`: `command -v bm` must print
+3. Check the files as your user: `git status` (no changes you did not make) and
+   `git log` (the commits you expect).
+4. Copy `bm` and the helper into `/usr/local/bin`, owned by root:
+   `sudo /usr/bin/install -m 755 -o root -g wheel bm bm-touchid /usr/local/bin/`.
+   Programs that run as your user cannot change these copies. sudo runs only the
+   system `install`; `sudo make` would run whatever Makefile (or a planted
+   `GNUmakefile`) is in this folder as root. `/usr/local` and `/usr/local/bin` must be
+   owned by root (`ls -ld /usr/local /usr/local/bin`); on Intel Macs Homebrew often
+   owns `/usr/local/bin`, then use another root-owned folder.
+5. Make sure no other `bm` comes earlier in `PATH`: `command -v bm` must print
    `/usr/local/bin/bm`. A folder you can write to (such as `~/.local/bin`) earlier in
    `PATH` could hide the root-owned copy.
-5. Create the database: `bm init`.
+6. Create the database: `bm init`.
 
-`make install` instead links `bm` from this folder into `~/.local/bin`. That is handy
-while you work on `bm`, but then any program that runs as your user can change the script.
+The less safe option: `make install` links `bm` from this folder into `~/.local/bin`.
+That is handy while you work on `bm`, but then any program that runs as your user can
+change the script.
 
 `bm` ignores your `PATH`: it runs its tools from `/usr/bin:/bin:/usr/sbin:/sbin`, then
 `/usr/local/bin` and `/opt/homebrew/bin` (for `plink` and `telnet`), and keepassxc-cli
@@ -140,10 +145,10 @@ Limits:
 - While an approval is cached, any program that runs as your user can run `bm`
   (or `bm-touchid get`) without Touch ID. On an untrusted Mac do not use `--ttl`.
 - The access rule is bound to the helper's code signature. After you rebuild or
-  reinstall `bm-touchid` (`make`, `make install-system`), run `bm keychain on` again.
+  reinstall `bm-touchid`, run `bm keychain on` again.
   Otherwise macOS asks for your login password the next time the new helper reads the item.
 - With `make install`, `bm` runs from a folder you can write to, so any program that
-  runs as your user can change it. Use `sudo make install-system`.
+  runs as your user can change it. Install root-owned copies (see Install).
 - Any program can delete the Keychain item. It cannot read it; `bm` then asks for the
   master password again.
 - The helper uses the legacy Keychain access API (`SecAccess`, deprecated since
@@ -158,7 +163,7 @@ which `security` could read, with a new one that only the helper can read.
 
 ### Update from bm 1.1
 
-1. Run `make`, then `sudo make install-system` (see Install).
+1. Run `make`, check the files and copy them as root (see Install).
 2. Remove the old link: `rm ~/.local/bin/bm`. Check that `command -v bm` prints
    `/usr/local/bin/bm`.
 3. Run `bm keychain on` again, because the access rule is bound to the helper's code
