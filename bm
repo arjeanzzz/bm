@@ -95,24 +95,31 @@ ask_pass() {
 # Connect over ssh or telnet with the entry's username plus key or password.
 # URL forms: ssh://user@host:port, telnet://host:port, host.
 remote() {
-  local proto="$1" e url user pw t host port
-  if [[ -n "$TARGET" ]]; then
-    e=default
-    kx show -a title "$e" >/dev/null 2>&1 \
-      || die "no entry 'default', create it: bm add ssh://default -t default -u <user> [-p] [-k keyfile]"
-  else
+  local proto="$1" e="" url="" user="" pw="" t host port
+  if [[ -z "$TARGET" ]]; then
     e="$(resolve "$2")"
+  elif kx show -a title default >/dev/null 2>&1; then
+    e=default
+  elif (( EXPLICIT_D )); then
+    die "no entry 'default', create it: bm add ssh://default -t default -u <user> [-p] [-k keyfile]"
+  else
+    echo "no 'default' entry, connecting without saved credentials" >&2
   fi
   shift 2
-  { IFS= read -r url; IFS= read -r user; IFS= read -r pw; } < <(kx show -s -a url -a username -a password "$e")
+  [[ -n "$e" ]] && { IFS= read -r url; IFS= read -r user; IFS= read -r pw; } \
+    < <(kx show -s -a url -a username -a password "$e")
   t="${TARGET:-${url:-${e##*/}}}"; t="${t#*://}"; t="${t%%/*}"
-  if [[ "$t" == *@* ]]; then [[ -n "$user" ]] || user="${t%%@*}"; t="${t#*@}"; fi
+  if [[ "$t" == *@* ]]; then
+    # For an entry its username field wins; for a server typed by hand, user@ wins.
+    [[ -n "$TARGET" || -z "$user" ]] && user="${t%%@*}"
+    t="${t#*@}"
+  fi
   host="${t%%:*}"; port=""; [[ "$t" == *:* ]] && port="${t##*:}"
   [[ -n "$host" ]] || die "no host in $e"
 
   if [[ "$proto" == ssh || "$proto" == plink ]]; then
     # ponytail: key goes to ssh-agent for KEY_TTL seconds, never to disk.
-    if kx attachment-export --stdout "$e" ssh-key 2>/dev/null | ssh-add -q -t "${BM_KEY_TTL:-600}" - 2>/dev/null; then
+    if [[ -n "$e" ]] && kx attachment-export --stdout "$e" ssh-key 2>/dev/null | ssh-add -q -t "${BM_KEY_TTL:-600}" - 2>/dev/null; then
       echo "key from $e loaded into ssh-agent for ${BM_KEY_TTL:-600}s" >&2
     fi
     if [[ "$proto" == plink ]]; then
@@ -202,9 +209,15 @@ case "$cmd" in
     ;;
   ssh|telnet|plink)
     # -d <server>: any server, credentials from the root entry "default".
-    TARGET=""
-    if [[ "${1:-}" == -d ]]; then TARGET="${2:-}"; [[ -n "$TARGET" ]] || die "$cmd -d: server required"; shift; fi
+    # No entry matches the query: treat the query as a server, the same as -d.
+    TARGET="" EXPLICIT_D=0
+    if [[ "${1:-}" == -d ]]; then
+      TARGET="${2:-}"; EXPLICIT_D=1; [[ -n "$TARGET" ]] || die "$cmd -d: server required"; shift
+    fi
     [[ -n "${1:-}" ]] || die "$cmd: query required"
+    if [[ -z "$TARGET" ]] && ! kx search "$1" >/dev/null 2>&1; then
+      TARGET="$1"; echo "no entry for $1, using 'default'" >&2
+    fi
     remote "$cmd" "$@"
     ;;
   ls)

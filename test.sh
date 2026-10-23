@@ -68,10 +68,17 @@ printf '%s\n%s\n%s\n' "$mp" kpw kpw | ./bm add ssh://srv3.lan -u web -p -k "$tmp
 out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv3 2>&1)"
 grep -q 'agent got key' <<<"$out" && grep -q 'pw: kpw' <<<"$out" || { echo "FAIL ssh key+pw: $out"; exit 1; }
 
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh 10.9.9.9 2>&1)"
+grep -q 'without saved credentials' <<<"$out" && grep -q 'args: 10.9.9.9$' <<<"$out" || { echo "FAIL fallback no default: $out"; exit 1; }
 if printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh -d any.lan >/dev/null 2>&1; then echo "FAIL -d without default"; exit 1; fi
 printf '%s\n%s\n%s\n' "$mp" dpw dpw | ./bm add ssh://default -t default -u ops -p >/dev/null
 out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh -d 10.0.0.5:2200 2>&1)"
 grep -q 'args: -p 2200 -l ops 10.0.0.5' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL ssh -d: $out"; exit 1; }
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh -d root@1.2.3.4 2>&1)"
+grep -q 'args: -l root 1.2.3.4' <<<"$out" || { echo "FAIL ssh -d user@: $out"; exit 1; }
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh admin@10.0.0.9 2>&1)"
+grep -q "using 'default'" <<<"$out" && grep -q 'args: -l admin 10.0.0.9' <<<"$out" && grep -q 'pw: dpw' <<<"$out" \
+  || { echo "FAIL fallback to default: $out"; exit 1; }
 
 out="$({ printf '%s\n' "$mp"; sleep 2; } | PATH="$fake:$PATH" ./bm telnet sw1 2>&1)"
 grep -q 'telnet sw1.lan 23' <<<"$out" && grep -q 'got admin/pw3' <<<"$out" || { echo "FAIL telnet: $out"; exit 1; }

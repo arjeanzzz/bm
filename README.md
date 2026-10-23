@@ -69,7 +69,11 @@ that has no entry. They use the username, key and password of the root entry `de
 ```
 bm add ssh://default -t default -u ops -p -k ~/.ssh/id_ops
 bm ssh -d 10.0.0.5:2200
+bm ssh -d admin@10.0.0.5    # user@ overrides the username of "default"
 ```
+
+When no entry matches the query, `bm ssh|plink|telnet <query>` works as `-d <query>`.
+If there is no `default` entry either, it connects without saved credentials.
 
 ## Touch ID
 
