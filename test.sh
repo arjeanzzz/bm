@@ -163,7 +163,14 @@ if [[ -x ./bm-touchid ]]; then
   echo "$hp $exp $(printf '%s' "$hp:$exp" | openssl dgst -sha256 -hmac "$mp" -r | cut -d' ' -f1)" > "$BM_TOUCHID_STATE"
   if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: cache keyed with the master password accepted"; exit 1; fi
 
-  ./bm lock >/dev/null
+  # SIGTERM: the holder removes its state file. A stopped holder ignores SIGTERM, so
+  # bm lock then sends SIGKILL, and it removes the state file in any case.
+  kill "$hp"; sleep 1
+  [[ ! -e "$BM_TOUCHID_STATE" ]] || { echo "FAIL keychain: holder left its state file on SIGTERM"; exit 1; }
+  hold; kill -STOP "$hp"
+  echo "$hp $exp 00" > "$BM_TOUCHID_STATE"
+  ./bm lock >/dev/null; sleep 1
+  kill -0 "$hp" 2>/dev/null && { echo "FAIL keychain: stopped holder survived bm lock"; exit 1; }
   [[ ! -e "$BM_TOUCHID_STATE" ]] || { echo "FAIL keychain: state file left after bm lock"; exit 1; }
   ./bm keychain off >/dev/null
   security find-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1 && { echo "FAIL keychain off"; exit 1; }

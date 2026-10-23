@@ -115,7 +115,8 @@ password. If you did not start such a request, click **Deny**.
 
 By default `bm` asks for Touch ID for every command. `bm keychain on --ttl 3600` keeps
 one Touch ID valid for 1 hour, or until the screen locks; add `--no-lock` to keep it
-when the screen locks. `bm lock` forgets it at once. To change these, run
+when the screen locks. `bm lock` forgets it at once: it ends the helper process that
+holds the approval (with `SIGKILL` if needed) and deletes its file. To change these, run
 `bm keychain on` again. They are stored in the Keychain item with the master password,
 not in the environment or the config file, so another program cannot raise them. The
 cached approval is signed with a random key that `bm keychain on` stores in the same

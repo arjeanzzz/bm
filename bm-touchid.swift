@@ -14,7 +14,8 @@
 // lock is true. It is a state file "pid expiry hmac" plus a running holder process with
 // that pid. The HMAC is keyed with "key", 32 random bytes made by `set` that only this
 // helper can read, so the state file (readable by your programs) gives nothing to guess
-// offline and a program cannot forge an approval.
+// offline and a program cannot forge an approval. It covers the holder's start time, so
+// a new process that gets the pid of a dead holder does not revive the approval.
 import CryptoKit
 import Foundation
 import LocalAuthentication
@@ -35,6 +36,15 @@ func exePath(_ pid: pid_t) -> String? {
     return URL(fileURLWithPath: String(cString: buf)).resolvingSymlinksInPath().path
 }
 let me = exePath(getpid())!
+
+// The kernel's record of a process: start time and state.
+func procInfo(_ pid: pid_t) -> proc_bsdinfo? {
+    var info = proc_bsdinfo()
+    let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+    return proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size ? info : nil
+}
+
+func startTime(_ info: proc_bsdinfo) -> String { "\(info.pbi_start_tvsec).\(info.pbi_start_tvusec)" }
 
 // MARK: Keychain
 
@@ -83,10 +93,10 @@ func storeItem(_ service: String, _ account: String, _ password: String, _ ttl: 
 
 // MARK: Cached approval
 
-func message(_ pid: pid_t, _ expiry: Int) -> Data { Data("\(pid):\(expiry)".utf8) }
+func message(_ pid: pid_t, _ start: String, _ expiry: Int) -> Data { Data("\(pid):\(start):\(expiry)".utf8) }
 
-func mac(_ key: Data, _ pid: pid_t, _ expiry: Int) -> String {
-    let code = HMAC<SHA256>.authenticationCode(for: message(pid, expiry), using: SymmetricKey(data: key))
+func mac(_ key: Data, _ pid: pid_t, _ start: String, _ expiry: Int) -> String {
+    let code = HMAC<SHA256>.authenticationCode(for: message(pid, start, expiry), using: SymmetricKey(data: key))
     return code.map { String(format: "%02x", $0) }.joined()
 }
 
@@ -106,15 +116,17 @@ func hexData(_ s: String) -> Data? {
 func readState() -> (pid: pid_t, expiry: Int, mac: String)? {
     guard let s = try? String(contentsOf: stateFile, encoding: .utf8) else { return nil }
     let f = s.split(separator: " ").map(String.init)
-    guard f.count == 3, let pid = pid_t(f[0]), let exp = Int(f[1]) else { return nil }
+    guard f.count == 3, let pid = pid_t(f[0]), pid > 0, let exp = Int(f[1]) else { return nil }
     return (pid, exp, f[2].trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
 func cacheValid(_ key: Data?, _ ttl: Int) -> Bool {
+    // A stopped holder (SIGSTOP) would miss the screen lock, so it approves nothing.
     guard ttl > 0, let key, let st = readState(), kill(st.pid, 0) == 0, exePath(st.pid) == me,
+          let info = procInfo(st.pid), info.pbi_status != 4 /* SSTOP */,
           Int(Date().timeIntervalSince1970) < st.expiry, let tag = hexData(st.mac) else { return false }
     // Constant time compare.
-    return HMAC<SHA256>.isValidAuthenticationCode(tag, authenticating: message(st.pid, st.expiry),
+    return HMAC<SHA256>.isValidAuthenticationCode(tag, authenticating: message(st.pid, startTime(info), st.expiry),
                                                   using: SymmetricKey(data: key))
 }
 
@@ -127,34 +139,48 @@ func startHolder(_ key: Data, _ ttl: Int, _ lock: Bool) {
     p.standardInput = FileHandle.nullDevice
     p.standardOutput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
-    guard (try? p.run()) != nil else { return }
+    guard (try? p.run()) != nil, let info = procInfo(p.processIdentifier) else { return }
     let expiry = Int(Date().timeIntervalSince1970) + ttl
     let dir = stateFile.deletingLastPathComponent()
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                              attributes: [.posixPermissions: 0o700])
     FileManager.default.createFile(atPath: stateFile.path,
-                                   contents: "\(p.processIdentifier) \(expiry) \(mac(key, p.processIdentifier, expiry))\n".data(using: .utf8),
+                                   contents: "\(p.processIdentifier) \(expiry) \(mac(key, p.processIdentifier, startTime(info), expiry))\n".data(using: .utf8),
                                    attributes: [.posixPermissions: 0o600])
 }
 
 func hold(_ seconds: Double, _ forgetOnLock: Bool) -> Never {
     signal(SIGHUP, SIG_IGN)
-    signal(SIGTERM) { _ in exit(0) }
     func done() -> Never {
         if readState()?.pid == getpid() { try? FileManager.default.removeItem(at: stateFile) }
         exit(0)
     }
+    // SIGTERM (bm lock) removes the state file too. It is handled on the run loop: a
+    // plain signal handler cannot safely do file work.
+    signal(SIGTERM, SIG_IGN)
+    let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+    term.setEventHandler { done() }
+    term.resume()
     if forgetOnLock {
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { _ in done() }
     }
     Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { _ in done() }
-    RunLoop.main.run()
+    withExtendedLifetime(term) { RunLoop.main.run() }
     done()
 }
 
+// SIGTERM, then SIGKILL: a stopped holder (SIGSTOP) does not act on SIGTERM. The state
+// file goes in any case.
 func forget() {
-    if let st = readState(), exePath(st.pid) == me { kill(st.pid, SIGTERM) }
+    if let st = readState(), st.pid != getpid(), exePath(st.pid) == me, let info = procInfo(st.pid) {
+        // Same start time: still that holder, not a new process with its pid.
+        let alive = { procInfo(st.pid).map(startTime) == startTime(info) }
+        kill(st.pid, SIGTERM)
+        var n = 0
+        while alive() && n < 20 { usleep(25_000); n += 1 }
+        if alive() { kill(st.pid, SIGKILL) }
+    }
     try? FileManager.default.removeItem(at: stateFile)
 }
 
