@@ -61,6 +61,13 @@ grep -q 'UserName: deploy' <<<"$out" && grep -q 'ssh-key' <<<"$out" || { echo "F
 out="$(printf '%s\n' "$mp" | ./bm show srv1)"
 grep -q 'Password: PROTECTED' <<<"$out" && ! grep -q 'pw1' <<<"$out" || { echo "FAIL show hides password: $out"; exit 1; }
 
+out="$(printf '%s\nn\n' "$mp" | ./bm show -s srv1 2>&1)"
+grep -q 'WARNING' <<<"$out" && ! grep -q 'pw1' <<<"$out" || { echo "FAIL show -s declined: $out"; exit 1; }
+out="$(printf '%s\ny\n' "$mp" | ./bm show -s srv1 2>&1)"
+grep -q 'Password: pw1' <<<"$out" || { echo "FAIL show -s: $out"; exit 1; }
+sleep 1
+[[ "$(pbpaste)" == pw1 ]] || { echo "FAIL show -s clipboard"; exit 1; }
+
 out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv1 2>&1)"
 grep -q 'args: -p 2222 -l root srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL ssh pw: $out"; exit 1; }
 

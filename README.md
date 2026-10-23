@@ -20,6 +20,7 @@ bm find example             # search
 bm open example             # open in the browser
 bm url example              # print the URL
 bm show example             # fields and attachments, password shown as PROTECTED
+bm show -s example          # asks, then shows the password and copies it
 bm pass example             # copy the password, clipboard clears after 20 s
 bm user example             # copy the username
 bm edit example --url https://example.org

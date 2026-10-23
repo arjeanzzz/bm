@@ -30,7 +30,8 @@ Usage: bm <command> [args]
   find <query>                  search entries
   open <query>                  open the URL in the default browser
   url <query>                   print the URL
-  show <query>                  show the entry fields and attachments (password hidden)
+  show [-s] <query>             show the entry fields and attachments (password hidden);
+                                -s asks, then shows the password and copies it
   pass <query>                  copy the password to the clipboard
   user <query>                  copy the username to the clipboard
   ssh <query> [ssh args]        connect with the entry's key or password
@@ -238,18 +239,30 @@ case "$cmd" in
     if [[ "$cmd" == open ]]; then open "$u"; else echo "$u"; fi
     ;;
   show)
+    secret=0; [[ "${1:-}" == -s ]] && { secret=1; shift; }
     [[ -n "${1:-}" ]] || die "show: query required"
     e="$(resolve "$1")"
+    if (( secret )); then
+      echo "WARNING: the password of $e will be shown in clear text." >&2
+      echo "It stays in the terminal scrollback and can be seen on your screen." >&2
+      read -rp "Show it? [y/N] " a
+      [[ "$a" == y || "$a" == Y ]] || exit 0
+    fi
     echo "Path: $e"
     # Without -s keepassxc-cli prints the password as PROTECTED.
-    kx show --show-attachments "$e"
+    if (( secret )); then kx show --show-attachments -s "$e"; else kx show --show-attachments "$e"; fi
+    if (( secret )); then
+      kx clip "$e" "$CLIP_TIMEOUT" >/dev/null 2>&1 &
+      disown
+      echo "password copied, clears in ${CLIP_TIMEOUT}s" >&2
+    fi
     ;;
   pass|user)
     [[ -n "${1:-}" ]] || die "$cmd: query required"
     e="$(resolve "$1")"
     attr=password; [[ "$cmd" == user ]] && attr=username
     # clip blocks until it clears the clipboard, so run it in the background.
-    kx clip -a "$attr" "$e" "$CLIP_TIMEOUT" >/dev/null &
+    kx clip -a "$attr" "$e" "$CLIP_TIMEOUT" >/dev/null 2>&1 &
     disown
     echo "$attr of $e copied, clears in ${CLIP_TIMEOUT}s"
     ;;
