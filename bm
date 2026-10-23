@@ -18,7 +18,7 @@ CONFIG="${BM_CONFIG:-$HOME/.config/bm/config}"
 if [[ -f "$CONFIG" ]]; then
   n=0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    n=$((n + 1))
+    n=$((n + 1)); line="${line%$'\r'}"
     [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
     if [[ ! "$line" =~ ^(BM_DB|BM_KEYFILE|BM_CLIP_TIMEOUT|BM_KEY_TTL)=(.*)$ ]]; then
       echo "bm: $CONFIG:$n ignored, allowed: BM_DB BM_KEYFILE BM_CLIP_TIMEOUT BM_KEY_TTL" >&2
@@ -93,7 +93,7 @@ master() {
     # The dialog shows who asks (bm and its arguments), the helper finds that itself.
     MP="$("$TOUCHID" get "$KC_SERVICE" "$DB")" || die "Touch ID failed"
   else
-    read -rsp "Master password: " MP; echo >&2
+    IFS= read -rsp "Master password: " MP; echo >&2
   fi
 }
 
@@ -119,8 +119,8 @@ resolve() {
 
 ask_pass() {
   local p1 p2
-  read -rsp "Entry password: " p1; echo >&2
-  read -rsp "Repeat: " p2; echo >&2
+  IFS= read -rsp "Entry password: " p1; echo >&2
+  IFS= read -rsp "Repeat: " p2; echo >&2
   [[ "$p1" == "$p2" ]] || die "passwords do not match"
   EXTRA=("$p1")
 }
@@ -361,7 +361,7 @@ On an untrusted Mac do not use --ttl, or do not use Keychain.
 EOF
         read -rp "Store the master password in Keychain? [y/N] " a
         [[ "$a" == y || "$a" == Y ]] || exit 0
-        read -rsp "Master password: " MP; echo >&2
+        IFS= read -rsp "Master password: " MP; echo >&2
         # Check the password before storing it.
         kx ls >/dev/null || die "wrong master password"
         # Drop an old item made by `security` (it trusts `security`), then let the

@@ -3,6 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+# No BM_* setting from the caller (BM_KEYFILE, BM_ASKPASS, BM_TOUCHID_STATE, ...).
+for v in $(compgen -v BM_ || true); do unset "$v"; done
 # BM_CONFIG: never read the real config, it could point BM_DB at the real database.
 export BM_DB="$tmp/t.kdbx" BM_CLIP_TIMEOUT=2 BM_CONFIG="$tmp/config"
 mp=test-master
@@ -26,6 +28,8 @@ BM_TOUCHID_TTL=3600
 PATH=/nonexistent
 BM_DB="~/t.kdbx"
 EOF
+# Windows line ends (CR LF) work too.
+awk '{ printf "%s\r\n", $0 }' "$BM_CONFIG" >"$tmp/crlf"; mv "$tmp/crlf" "$BM_CONFIG"
 out="$(printf '%s\n' "$mp" | HOME="$tmp" BM_DB=/nonexistent ./bm ls 2>&1)"
 [[ ! -e "$tmp/pwned" ]] || { echo "FAIL config ran as code"; exit 1; }
 grep -q '^hn$' <<<"$out" || { echo "FAIL config BM_DB: $out"; exit 1; }
