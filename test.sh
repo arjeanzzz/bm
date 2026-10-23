@@ -1,5 +1,6 @@
 #!/bin/bash
-# Smoke test on a throwaway database. Note: briefly uses the system clipboard.
+# Smoke test on a throwaway database, macOS and Linux. Note: briefly uses the system
+# clipboard.
 set -euo pipefail
 cd "$(dirname "$0")"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
@@ -8,6 +9,20 @@ for v in $(compgen -v BM_ || true); do unset "$v"; done
 # BM_CONFIG: never read the real config, it could point BM_DB at the real database.
 export BM_DB="$tmp/t.kdbx" BM_CLIP_TIMEOUT=2 BM_CONFIG="$tmp/config"
 mp=test-master
+os="$(uname -s)"
+
+# Clipboard: pbpaste on macOS; on Linux the tool keepassxc-cli uses (wl-copy on Wayland,
+# else xclip), which needs a display.
+noclip=0
+if [[ "$os" == Darwin ]]; then clipboard() { pbpaste; }
+elif [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+  clipboard() { wl-paste -n 2>/dev/null || true; }
+  command -v wl-copy >/dev/null && command -v wl-paste >/dev/null || noclip=1
+elif [[ -n "${DISPLAY:-}" ]]; then
+  clipboard() { xclip -o -selection clipboard 2>/dev/null || true; }
+  command -v xclip >/dev/null || noclip=1
+else noclip=1; fi
+(( noclip )) && echo "skip: clipboard checks (no display, or no wl-copy/wl-paste or xclip)"
 
 printf '%s\n%s\n' "$mp" "$mp" | ./bm init >/dev/null
 printf '%s\n%s\n%s\n' "$mp" s3cret s3cret | ./bm add https://example.com/login -g work/dev -u bob -p >/dev/null
@@ -38,11 +53,16 @@ rm "$BM_CONFIG"
 
 [[ "$(printf '%s\n' "$mp" | ./bm url hn)" == https://news.ycombinator.com ]] || { echo "FAIL url"; exit 1; }
 
-printf '%s\n' "$mp" | ./bm pass example >/dev/null
-sleep 1
-[[ "$(pbpaste)" == s3cret ]] || { echo "FAIL pass"; exit 1; }
-sleep 3
-[[ "$(pbpaste)" != s3cret ]] || { echo "FAIL clipboard not cleared"; exit 1; }
+if (( noclip )); then
+  # Without a clipboard bm says so, instead of reporting a copy.
+  if printf '%s\n' "$mp" | ./bm pass example >/dev/null 2>&1; then echo "FAIL pass without a clipboard"; exit 1; fi
+else
+  printf '%s\n' "$mp" | ./bm pass example >/dev/null
+  sleep 1
+  [[ "$(clipboard)" == s3cret ]] || { echo "FAIL pass"; exit 1; }
+  sleep 3
+  [[ "$(clipboard)" != s3cret ]] || { echo "FAIL clipboard not cleared"; exit 1; }
+fi
 
 # The caller's PATH and shell settings do not reach bm: fake tools early in PATH,
 # BASH_ENV and an exported function must not run, SHELLOPTS=xtrace must not leak.
@@ -51,7 +71,8 @@ for t in keepassxc-cli pbcopy xclip wl-copy uname; do
   printf '#!/bin/sh\ntouch "%s/hijacked"\n' "$tmp" >"$evil/$t"; chmod +x "$evil/$t"
 done
 printf 'touch "%s/hijacked"\n' "$tmp" >"$evil/env.sh"
-printf '%s\n' "$mp" | PATH="$evil:$PATH" ./bm pass example >/dev/null
+printf '%s\n' "$mp" | PATH="$evil:$PATH" ./bm pass example >/dev/null 2>&1 || (( noclip )) \
+  || { echo "FAIL pass with fake tools in PATH"; exit 1; }
 printf '%s\n' "$mp" | PATH="$evil:$PATH" BASH_ENV="$evil/env.sh" ./bm ls >/dev/null
 ( export tmp; read() { touch "$tmp/hijacked"; builtin read "$@"; }; export -f read; printf '%s\n' "$mp" | ./bm ls >/dev/null )
 out="$(printf '%s\n' "$mp" | env SHELLOPTS=xtrace ./bm ls 2>&1)"
@@ -112,8 +133,7 @@ out="$(printf '%s\nn\n' "$mp" | ./bm show -s srv1 2>&1)"
 grep -q 'WARNING' <<<"$out" && ! grep -q 'pw1' <<<"$out" || { echo "FAIL show -s declined: $out"; exit 1; }
 out="$(printf '%s\ny\n' "$mp" | ./bm show -s srv1 2>&1)"
 grep -q 'Password: pw1' <<<"$out" || { echo "FAIL show -s: $out"; exit 1; }
-sleep 1
-[[ "$(pbpaste)" == pw1 ]] || { echo "FAIL show -s clipboard"; exit 1; }
+if (( ! noclip )); then sleep 1; [[ "$(clipboard)" == pw1 ]] || { echo "FAIL show -s clipboard"; exit 1; }; fi
 
 out="$(printf '%s\n' "$mp" | "$tbm" ssh srv1 2>&1)"
 grep -q 'args: -p 2222 -l root -- srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL ssh pw: $out"; exit 1; }
@@ -162,7 +182,7 @@ grep -q 'plink -ssh -agent -l ops -pwfile /dev/fd/[0-9]* 10.0.0.7' <<<"$out" && 
 # Keychain + Touch ID cache, without a Touch ID dialog: NONINTERACTIVE makes the
 # helper fail instead of asking. A valid cache needs one real Touch ID (its HMAC key is
 # random and only the helper can read it), so only refusals are tested here.
-if [[ -x ./bm-touchid ]]; then
+if [[ "$os" == Darwin && -x ./bm-touchid ]]; then
   export BM_TOUCHID_STATE="$tmp/touchid.state" BM_TOUCHID_NONINTERACTIVE=1
   # || true: under set -e a missing item would end the trap before rm.
   trap './bm-touchid --forget; security delete-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
@@ -195,6 +215,25 @@ if [[ -x ./bm-touchid ]]; then
   ./bm keychain off >/dev/null
   security find-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1 && { echo "FAIL keychain off"; exit 1; }
   unset BM_TOUCHID_NONINTERACTIVE
+fi
+
+# Linux: no Touch ID options; the master password in the secret service (secret-tool)
+# needs a session bus with a secret service, else that part is skipped.
+if [[ "$os" != Darwin ]]; then
+  if printf 'y\n%s\n' "$mp" | ./bm keychain on --ttl 60 >/dev/null 2>&1; then echo "FAIL keychain: --ttl accepted on Linux"; exit 1; fi
+  [[ "$(./bm lock)" == *"no Touch ID"* ]] || { echo "FAIL lock on Linux"; exit 1; }
+  if command -v secret-tool >/dev/null && { [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || [[ -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]]; } \
+     && printf x | secret-tool store --label="bm test" service bm-test account "$tmp" 2>/dev/null; then
+    secret-tool clear service bm-test account "$tmp"
+    trap 'secret-tool clear service bm account "$BM_DB" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+    out="$(printf 'y\n%s\n' "$mp" | ./bm keychain on 2>&1)"
+    grep -q 'D-Bus' <<<"$out" || { echo "FAIL keychain: no Linux warning: $out"; exit 1; }
+    ./bm ls </dev/null | grep -q '^default$' || { echo "FAIL keychain: not read with secret-tool"; exit 1; }
+    ./bm keychain off >/dev/null
+    if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain off"; exit 1; fi
+  else
+    echo "skip: secret-tool (no session bus or secret service)"
+  fi
 fi
 
 [[ "$(./bm --version)" == "bm 1.2" ]] || { echo "FAIL version"; exit 1; }

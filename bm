@@ -5,11 +5,12 @@ set -euo pipefail
 # Fixed PATH, system folders first: a program that runs as you cannot slip in a fake
 # keepassxc-cli, pbcopy, ssh etc. through a folder you can write to early in your PATH.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
+OS="$(uname -s)"
 # keepassxc-cli runs clipboard tools by name (xclip before pbcopy, also on macOS):
 # system folders only.
 KXC_PATH="$PATH"
-# plink and telnet come from Homebrew; /opt/homebrew/bin is writable by you.
-PATH="$PATH:/usr/local/bin:/opt/homebrew/bin"
+# On macOS plink and telnet come from Homebrew; /opt/homebrew/bin is writable by you.
+if [[ "$OS" == Darwin ]]; then PATH="$PATH:/usr/local/bin:/opt/homebrew/bin"; else PATH="$PATH:/usr/local/bin"; fi
 export PATH
 
 # Optional settings file with NAME=value lines. It is read as data, never run as code:
@@ -37,13 +38,28 @@ CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
 HERE="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 TOUCHID="$HERE/bm-touchid"
-KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli
+if [[ "$OS" == Darwin ]]; then KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli
+else KXC="$(command -v keepassxc-cli || true)"; fi  # the distro package
 
 KEY_ARGS=()
 [[ -n "${BM_KEYFILE:-}" ]] && KEY_ARGS=(-k "$BM_KEYFILE")
 
 die() { echo "bm: $*" >&2; exit 1; }
-need_kxc() { [[ -x "$KXC" ]] || die "keepassxc-cli not found at $KXC, install KeePassXC (see README)"; }
+need_kxc() { [[ -x "$KXC" ]] || die "keepassxc-cli not found${KXC:+ at $KXC}, install KeePassXC (see README)"; }
+
+# Linux: secret-tool talks to the secret service over the D-Bus session bus. Without a
+# bus it could try to start one, so bm does not call it then.
+secret_service() {
+  command -v secret-tool >/dev/null && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" || -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]]
+}
+
+# Linux: keepassxc-cli clip needs a display and wl-copy (Wayland) or xclip (X11).
+clip_ok() {
+  [[ "$OS" == Darwin ]] && return 0
+  local tool=xclip; [[ -n "${WAYLAND_DISPLAY:-}" ]] && tool=wl-copy
+  if [[ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]]; then echo "bm: no clipboard without a display" >&2; return 1; fi
+  (PATH="$KXC_PATH"; command -v "$tool" >/dev/null) || { echo "bm: no clipboard: install $tool" >&2; return 1; }
+}
 
 usage() {
   cat <<'EOF'
@@ -73,7 +89,8 @@ Usage: bm <command> [args]
   keychain on [--ttl SECONDS] [--no-lock]
                                 store the master password in Keychain (Touch ID);
                                 --ttl: seconds one Touch ID stays valid (default 0 =
-                                ask every time), --no-lock: keep it when the screen locks
+                                ask every time), --no-lock: keep it when the screen locks;
+                                Linux: in the secret service (secret-tool), no options
   keychain off                  forget the master password in Keychain
   lock                          forget the Touch ID approval now
   version                       print the version
@@ -83,11 +100,14 @@ Settings (environment or NAME=value lines in ~/.config/bm/config):
 EOF
 }
 
-# Master password: Keychain behind Touch ID if enabled, otherwise prompt.
+# Master password: Keychain behind Touch ID (Linux: secret service) if enabled, otherwise prompt.
 MP=""
 master() {
   [[ -n "$MP" ]] && return
-  if security find-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1; then
+  if [[ "$OS" != Darwin ]]; then
+    if secret_service && MP="$(secret-tool lookup service "$KC_SERVICE" account "$DB" 2>/dev/null)" && [[ -n "$MP" ]]; then return; fi
+    IFS= read -rsp "Master password: " MP; echo >&2
+  elif security find-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1; then
     [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
     # Only bm-touchid can read the item; it prints the password after Touch ID.
     # The dialog shows who asks (bm and its arguments), the helper finds that itself.
@@ -164,7 +184,8 @@ remote() {
       local args=(-ssh -agent)
       [[ -n "$port" ]] && args+=(-P "$port")
       [[ -n "$user" ]] && args+=(-l "$user")
-      [[ -n "$pw" ]] && args+=(-pwfile <(printf '%s\n' "$pw"))
+      # <(...) in the exec line: bash 4+ closes one made in an assignment before exec.
+      [[ -n "$pw" ]] && exec plink "${args[@]}" -pwfile <(printf '%s\n' "$pw") "$host" "$@"
       exec plink "${args[@]}" "$host" "$@"
     fi
     # ssh tries keys first (agent, ~/.ssh), then the password.
@@ -285,7 +306,9 @@ case "$cmd" in
     e="$(resolve "$1")"
     u="$(kx show -a url "$e")"
     [[ -n "$u" ]] || die "no URL in $e"
-    if [[ "$cmd" == open ]]; then open "$u"; else echo "$u"; fi
+    if [[ "$cmd" != open ]]; then echo "$u"
+    elif [[ "$OS" == Darwin ]]; then open "$u"
+    else xdg-open "$u"; fi
     ;;
   show)
     secret=0; [[ "${1:-}" == -s ]] && { secret=1; shift; }
@@ -300,7 +323,7 @@ case "$cmd" in
     echo "Path: $e"
     # Without -s keepassxc-cli prints the password as PROTECTED.
     if (( secret )); then kx show --show-attachments -s "$e"; else kx show --show-attachments "$e"; fi
-    if (( secret )); then
+    if (( secret )) && clip_ok; then
       kx clip "$e" "$CLIP_TIMEOUT" >/dev/null 2>&1 &
       disown
       echo "password copied, clears in ${CLIP_TIMEOUT}s" >&2
@@ -310,6 +333,7 @@ case "$cmd" in
     [[ -n "${1:-}" ]] || die "$cmd: query required"
     e="$(resolve "$1")"
     attr=password; [[ "$cmd" == user ]] && attr=username
+    clip_ok || exit 1
     # clip blocks until it clears the clipboard, so run it in the background.
     kx clip -a "$attr" "$e" "$CLIP_TIMEOUT" >/dev/null 2>&1 &
     disown
@@ -342,6 +366,7 @@ case "$cmd" in
     case "${1:-}" in
       on)
         shift; ttl=0 lock=1
+        [[ "$OS" == Darwin || $# -eq 0 ]] || die "keychain on: --ttl and --no-lock need Touch ID (macOS)"
         while [[ $# -gt 0 ]]; do
           case "$1" in
             --ttl) [[ "${2:-}" =~ ^[0-9]{1,9}$ ]] || die "keychain on: --ttl takes seconds (0-999999999)"
@@ -350,20 +375,40 @@ case "$cmd" in
             *) die "keychain on: unknown option $1" ;;
           esac
         done
-        [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
         need_kxc
-        cat >&2 <<'EOF'
+        if [[ "$OS" == Darwin ]]; then
+          [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
+          cat >&2 <<'EOF'
 WARNING: use this only on a trusted Mac.
 Only bm-touchid can read the stored master password, after Touch ID.
 But while one Touch ID approval is cached (--ttl, default 0 = no cache),
 any program that runs as your user can run bm without Touch ID.
 On an untrusted Mac do not use --ttl, or do not use Keychain.
 EOF
-        read -rp "Store the master password in Keychain? [y/N] " a
+          store=Keychain
+        else
+          command -v secret-tool >/dev/null || die "keychain on: install secret-tool (libsecret-tools)"
+          cat >&2 <<'EOF'
+WARNING: on Linux this is a convenience only, it protects nothing.
+The master password goes to the secret service (GNOME Keyring, KWallet) and
+bm reads it from there without asking. There is no Touch ID or other prompt:
+while your keyring is unlocked, any program that runs as your user can read it
+through D-Bus (secret-tool lookup). Do not use it on a shared or untrusted machine.
+EOF
+          store="the secret service"
+        fi
+        read -rp "Store the master password in $store? [y/N] " a
         [[ "$a" == y || "$a" == Y ]] || exit 0
         IFS= read -rsp "Master password: " MP; echo >&2
         # Check the password before storing it.
         kx ls >/dev/null || die "wrong master password"
+        if [[ "$OS" != Darwin ]]; then
+          # secret-tool store reads the password from stdin, never from argv.
+          printf '%s' "$MP" | secret-tool store --label="bm master password" service "$KC_SERVICE" account "$DB" \
+            || die "cannot store it with secret-tool"
+          echo "master password stored in the secret service, bm no longer asks for it"
+          exit 0
+        fi
         # Drop an old item made by `security` (it trusts `security`), then let the
         # helper create a new one that trusts only the helper.
         security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1 || true
@@ -375,6 +420,11 @@ EOF
         else echo "Touch ID is asked for every command"; fi
         ;;
       off)
+        if [[ "$OS" != Darwin ]]; then
+          command -v secret-tool >/dev/null || die "keychain off: secret-tool not found"
+          secret-tool clear service "$KC_SERVICE" account "$DB" && echo "removed from the secret service"
+          exit
+        fi
         [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
         security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null && echo "removed from Keychain"
         ;;
@@ -382,6 +432,7 @@ EOF
     esac
     ;;
   lock)
+    [[ "$OS" == Darwin ]] || { echo "nothing to forget: no Touch ID approval on Linux"; exit 0; }
     [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
     echo "Touch ID approval forgotten"
     ;;

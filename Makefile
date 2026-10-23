@@ -1,5 +1,12 @@
 PREFIX ?= $(HOME)/.local
 
+# The Touch ID helper is macOS only; on Linux make builds nothing and install links bm.
+ifeq ($(shell uname -s),Darwin)
+all: bm-touchid
+else
+all:
+endif
+
 # Hardened runtime blocks DYLD_INSERT_LIBRARIES and debugger attach to the helper.
 bm-touchid: bm-touchid.swift
 	swiftc -O $< -o $@
@@ -7,7 +14,7 @@ bm-touchid: bm-touchid.swift
 
 # The less safe install: a link to bm in this folder, which any program that runs as
 # you can change. For daily use copy bm and the helper as root (see README).
-install: bm-touchid
+install: all
 	mkdir -p $(PREFIX)/bin
 	ln -sf $(CURDIR)/bm $(PREFIX)/bin/bm
 
@@ -26,4 +33,4 @@ release: bm bm-touchid.swift
 test:
 	./test.sh
 
-.PHONY: install release test
+.PHONY: all install release test
