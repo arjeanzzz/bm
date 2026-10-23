@@ -2,11 +2,14 @@
 // (or the login password as fallback).
 //
 //   bm-touchid set <service> <account> <ttl> <lock 0|1>  store the password from stdin
-//   bm-touchid get <service> <account> [reason]          print the password after Touch ID
+//   bm-touchid get <service> <account> [note]            print the password after Touch ID
 //   bm-touchid --forget                                  drop the cached approval
 //
 // The Keychain item trusts only this binary, so `security find-generic-password -w`
 // and other programs get a macOS dialog that asks for the login password.
+//
+// The Touch ID dialog names the program that asks, as the kernel sees it (see caller()).
+// The caller's own note can only follow that.
 //
 // The item holds JSON {"password", "ttl", "lock", "key"}, so only someone who knows the
 // master password can change the cache settings; the environment cannot. A cached
@@ -184,6 +187,71 @@ func forget() {
     try? FileManager.default.removeItem(at: stateFile)
 }
 
+// MARK: Who asks
+
+// argv of a process as the kernel keeps it (KERN_PROCARGS2: argc, exec path, argv, env).
+func processArgs(_ pid: pid_t) -> [String]? {
+    var mib: [Int32] = [CTL_KERN, KERN_ARGMAX]
+    var argmax: Int32 = 0
+    var size = MemoryLayout<Int32>.size
+    guard sysctl(&mib, 2, &argmax, &size, nil, 0) == 0, argmax > 0 else { return nil }
+    var buf = [UInt8](repeating: 0, count: Int(argmax))
+    mib = [CTL_KERN, KERN_PROCARGS2, pid]
+    size = buf.count
+    guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return nil }
+    let argc = Int(buf.withUnsafeBytes { $0.load(as: Int32.self) })
+    var i = 4
+    while i < size && buf[i] != 0 { i += 1 }  // exec path
+    while i < size && buf[i] == 0 { i += 1 }  // padding
+    var argv: [String] = []
+    while argv.count < argc && i < size {
+        let start = i
+        while i < size && buf[i] != 0 { i += 1 }
+        argv.append(String(decoding: buf[start..<i], as: UTF8.self))
+        i += 1
+    }
+    return argv.count == argc ? argv : nil
+}
+
+// The parent process: its executable path from the kernel, and for a shell also its
+// arguments, e.g. "bm (/bin/bash -p /usr/local/bin/bm pass sw1)" or "/opt/homebrew/bin/node".
+// argv[0] is left out: any caller can set it.
+func caller() -> String {
+    let ppid = getppid()
+    guard let exe = exePath(ppid) else { return "process \(ppid)" }
+    var who = exe
+    let shells: Set = ["sh", "bash", "zsh", "dash", "ksh", "fish"]
+    if shells.contains(URL(fileURLWithPath: exe).lastPathComponent), let argv = processArgs(ppid), argv.count > 1 {
+        let rest = argv.dropFirst()
+        who = ([exe] + rest).joined(separator: " ")
+        // The script name first, unless the shell runs a -c command.
+        if !rest.contains("-c"), let script = rest.first(where: { !$0.hasPrefix("-") }) {
+            who = "\(URL(fileURLWithPath: script).lastPathComponent) (\(who))"
+        }
+    }
+    // The parent ended while we looked: its pid may belong to another process now.
+    return getppid() == ppid ? who : "a process that has ended"
+}
+
+// Dialog text: control and format characters (newlines, bidi overrides) become "?",
+// long text is cut.
+func printable(_ s: String, _ max: Int) -> String {
+    let q: Unicode.Scalar = "?"
+    var out = String.UnicodeScalarView()
+    for u in s.unicodeScalars {
+        let cat = u.properties.generalCategory
+        out.append(cat == .control || cat == .format ? q : u)
+    }
+    let t = String(out)
+    return t.count > max ? String(t.prefix(max - 1)) + "…" : t
+}
+
+func reason(_ note: String?) -> String {
+    var r = "unlock bookmarks for " + printable(caller(), 200)
+    if let note, !note.isEmpty { r += ", note from it: " + printable(note, 60) }
+    return r
+}
+
 func touchID(_ reason: String) -> Bool {
     let context = LAContext()
     var error: NSError?
@@ -202,7 +270,7 @@ func touchID(_ reason: String) -> Bool {
 
 // MARK: Main
 
-let usage = "usage: bm-touchid set <service> <account> <ttl> <lock 0|1> | get <service> <account> [reason] | --forget"
+let usage = "usage: bm-touchid set <service> <account> <ttl> <lock 0|1> | get <service> <account> [note] | --forget"
 
 switch args.count > 1 ? args[1] : "" {
 case "--hold" where args.count >= 4:
@@ -219,7 +287,7 @@ case "get" where args.count >= 4:
     if !cacheValid(item.key, item.ttl) {
         // Tests set this to check the cache without a Touch ID dialog. It can only deny.
         if env["BM_TOUCHID_NONINTERACTIVE"] == "1" { exit(3) }
-        guard touchID(args.count > 4 ? args[4] : "unlock") else { exit(1) }
+        guard touchID(reason(args.count > 4 ? args[4] : nil)) else { exit(1) }
         if item.ttl > 0, let key = item.key { startHolder(key, item.ttl, item.lock) }
     }
     print(item.password)

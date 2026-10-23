@@ -109,6 +109,12 @@ If there is no `default` entry either, it connects without saved credentials.
 `bm` asks for Touch ID (or the login password) instead of the master password.
 `bm keychain off` removes it.
 
+The Touch ID dialog says who asks, as macOS sees it: the program that started the
+helper, and for a shell script also its arguments, for example
+`unlock bookmarks for bm (/bin/bash -p /usr/local/bin/bm pass sw1)`. The program path
+comes from the kernel; the arguments are whatever that program was started with. If you
+did not just run that command, cancel.
+
 The Keychain item trusts only the `bm-touchid` helper. Any other program, including
 `security find-generic-password -w`, gets a macOS dialog that asks for your login
 password. If you did not start such a request, click **Deny**.

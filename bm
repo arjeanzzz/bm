@@ -90,7 +90,8 @@ master() {
   if security find-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1; then
     [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
     # Only bm-touchid can read the item; it prints the password after Touch ID.
-    MP="$("$TOUCHID" get "$KC_SERVICE" "$DB" "unlock bookmarks")" || die "Touch ID failed"
+    # The dialog shows who asks (bm and its arguments), the helper finds that itself.
+    MP="$("$TOUCHID" get "$KC_SERVICE" "$DB")" || die "Touch ID failed"
   else
     read -rsp "Master password: " MP; echo >&2
   fi
