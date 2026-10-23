@@ -30,4 +30,46 @@ printf '%s\n' "$mp" | ./bm ls | grep -q '^hn$' && { echo "FAIL rm"; exit 1; }
 
 if printf 'wrong\n' | ./bm ls >/dev/null 2>&1; then echo "FAIL wrong password accepted"; exit 1; fi
 
+# ssh/telnet: fake binaries record what bm passes to them.
+fake="$tmp/fake"; mkdir "$fake"
+cat >"$fake/ssh" <<'EOF'
+#!/bin/bash
+echo "args: $*"; [[ -n "${SSH_ASKPASS:-}" ]] && echo "pw: $("$SSH_ASKPASS" "root@h's password: ")"
+true
+EOF
+cat >"$fake/ssh-add" <<'EOF'
+#!/bin/bash
+grep -q 'BEGIN OPENSSH PRIVATE KEY' && echo "agent got key"
+EOF
+cat >"$fake/telnet" <<'EOF'
+#!/bin/bash
+echo "telnet $*"; printf 'login: '; read -r u; printf 'Password: '; read -r p; echo "got $u/$p"
+EOF
+chmod +x "$fake"/*
+ssh-keygen -q -t ed25519 -N '' -f "$tmp/k"
+
+printf '%s\n%s\n%s\n' "$mp" pw1 pw1 | ./bm add ssh://root@srv1.lan:2222 -p >/dev/null
+printf '%s\n' "$mp" | ./bm add ssh://deploy@srv2.lan -k "$tmp/k" >/dev/null
+printf '%s\n%s\n%s\n' "$mp" pw3 pw3 | ./bm add telnet://sw1.lan:23 -u admin -p >/dev/null
+
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv1 2>&1)"
+grep -q 'args: -p 2222 -l root srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL ssh pw: $out"; exit 1; }
+
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv2 uptime 2>&1)"
+grep -q 'agent got key' <<<"$out" && grep -q 'args: -l deploy srv2.lan uptime' <<<"$out" || { echo "FAIL ssh key: $out"; exit 1; }
+grep -q 'pw:' <<<"$out" && { echo "FAIL ssh key entry has no password: $out"; exit 1; }
+
+# Key and password in one entry: both go to ssh, ssh tries the key first.
+printf '%s\n%s\n%s\n' "$mp" kpw kpw | ./bm add ssh://srv3.lan -u web -p -k "$tmp/k" >/dev/null
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv3 2>&1)"
+grep -q 'agent got key' <<<"$out" && grep -q 'pw: kpw' <<<"$out" || { echo "FAIL ssh key+pw: $out"; exit 1; }
+
+if printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh -d any.lan >/dev/null 2>&1; then echo "FAIL -d without default"; exit 1; fi
+printf '%s\n%s\n%s\n' "$mp" dpw dpw | ./bm add ssh://default -t default -u ops -p >/dev/null
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh -d 10.0.0.5:2200 2>&1)"
+grep -q 'args: -p 2200 -l ops 10.0.0.5' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL ssh -d: $out"; exit 1; }
+
+out="$({ printf '%s\n' "$mp"; sleep 2; } | PATH="$fake:$PATH" ./bm telnet sw1 2>&1)"
+grep -q 'telnet sw1.lan 23' <<<"$out" && grep -q 'got admin/pw3' <<<"$out" || { echo "FAIL telnet: $out"; exit 1; }
+
 echo OK

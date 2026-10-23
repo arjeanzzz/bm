@@ -19,20 +19,25 @@ usage() {
 Usage: bm <command> [args]
 
   init                          create a new database
-  add <url> [-t title] [-g group] [-u user] [-p]
-                                add a bookmark (-p asks for a password)
+  add <url> [-t title] [-g group] [-u user] [-p] [-k keyfile]
+                                add a bookmark (-p asks for a password,
+                                -k attaches an SSH private key)
   ls [group]                    list entries
   find <query>                  search entries
   open <query>                  open the URL in the default browser
   url <query>                   print the URL
   pass <query>                  copy the password to the clipboard
   user <query>                  copy the username to the clipboard
+  ssh <query> [ssh args]        connect with the entry's key or password
+  ssh -d <[user@]host[:port]>   connect to any server with the "default" entry
+  telnet <query>                connect and log in with the entry's password
+  telnet -d <host[:port]>       same, with the "default" entry
   edit <query> [-t title] [-u user] [--url url] [-p]
                                 change an entry
   rm <query>                    move an entry to the recycle bin
   keychain on|off               store or forget the master password in Keychain (Touch ID)
 
-Environment: BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT
+Environment: BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT, BM_KEY_TTL
 EOF
 }
 
@@ -77,7 +82,64 @@ ask_pass() {
   EXTRA=("$p1")
 }
 
+# Connect over ssh or telnet with the entry's username plus key or password.
+# URL forms: ssh://user@host:port, telnet://host:port, host.
+remote() {
+  local proto="$1" e url user pw t host port
+  if [[ -n "$TARGET" ]]; then
+    e=default
+    kx show -a title "$e" >/dev/null 2>&1 \
+      || die "no entry 'default', create it: bm add ssh://default -t default -u <user> [-p] [-k keyfile]"
+  else
+    e="$(resolve "$2")"
+  fi
+  shift 2
+  { IFS= read -r url; IFS= read -r user; IFS= read -r pw; } < <(kx show -s -a url -a username -a password "$e")
+  t="${TARGET:-${url:-${e##*/}}}"; t="${t#*://}"; t="${t%%/*}"
+  if [[ "$t" == *@* ]]; then [[ -n "$user" ]] || user="${t%%@*}"; t="${t#*@}"; fi
+  host="${t%%:*}"; port=""; [[ "$t" == *:* ]] && port="${t##*:}"
+  [[ -n "$host" ]] || die "no host in $e"
+
+  if [[ "$proto" == ssh ]]; then
+    # ponytail: key goes to ssh-agent for KEY_TTL seconds, never to disk.
+    if kx attachment-export --stdout "$e" ssh-key 2>/dev/null | ssh-add -q -t "${BM_KEY_TTL:-600}" - 2>/dev/null; then
+      echo "key from $e loaded into ssh-agent for ${BM_KEY_TTL:-600}s" >&2
+    fi
+    # ssh tries keys first (agent, ~/.ssh), then the password.
+    if [[ -n "$pw" ]]; then
+      # ssh asks bm itself for the password; exported env does not show in argv.
+      export SSH_ASKPASS="$HERE/bm" SSH_ASKPASS_REQUIRE=force BM_ASKPASS_PW="$pw"
+    fi
+    exec ssh ${port:+-p "$port"} ${user:+-l "$user"} "$host" "$@"
+  fi
+
+  [[ -n "$pw" ]] || exec telnet "$host" ${port:+"$port"}
+  export BM_HOST="$host" BM_PORT="$port" BM_USER="$user" BM_PW="$pw"
+  exec expect -c '
+    set user $env(BM_USER); set pw $env(BM_PW)
+    unset env(BM_PW) env(BM_USER)
+    set timeout 20
+    if {$env(BM_PORT) eq ""} { spawn telnet $env(BM_HOST) } else { spawn telnet $env(BM_HOST) $env(BM_PORT) }
+    expect {
+      -nocase -re {(login|user ?name)[^:\n]*: *$} { if {$user ne ""} { send -- "$user\r" }; exp_continue }
+      -nocase -re {password[^:\n]*: *$} { send -- "$pw\r" }
+      timeout {}
+      eof { exit 1 }
+    }
+    interact'
+}
+
 cmd="${1:-}"; [[ $# -gt 0 ]] && shift
+
+# SSH_ASKPASS mode: answer password prompts, ask the user for anything else (host key etc).
+if [[ -n "${BM_ASKPASS_PW:-}" ]]; then
+  case "$cmd" in
+    *assword*|*assphrase*) printf '%s\n' "$BM_ASKPASS_PW" ;;
+    *) printf '%s ' "$cmd" >/dev/tty; read -r a </dev/tty; echo "$a" ;;
+  esac
+  exit 0
+fi
+
 [[ "$cmd" == init || "$cmd" == keychain || -z "$cmd" || "$cmd" == -h || "$cmd" == help ]] \
   || { [[ -f "$DB" ]] || die "no database at $DB, run 'bm init'"
        # Unlock once here: resolve() runs in a subshell and cannot keep MP.
@@ -91,17 +153,18 @@ case "$cmd" in
     ;;
   add)
     url="${1:-}"; [[ -n "$url" ]] || die "add: URL required"; shift
-    title="" group="" user="" withpass=0
+    title="" group="" user="" withpass=0 key=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         -t) title="$2"; shift 2 ;;
         -g) group="$2"; shift 2 ;;
         -u) user="$2"; shift 2 ;;
         -p) withpass=1; shift ;;
+        -k) key="$2"; [[ -f "$key" ]] || die "add: no key file $key"; shift 2 ;;
         *) die "add: unknown option $1" ;;
       esac
     done
-    [[ -n "$title" ]] || { title="${url#*://}"; title="${title%%/*}"; }
+    [[ -n "$title" ]] || { title="${url#*://}"; title="${title%%/*}"; title="${title#*@}"; }
     path="$title"
     if [[ -n "$group" ]]; then
       # Create every level of the group; existing groups make mkdir fail, which is fine.
@@ -113,7 +176,17 @@ case "$cmd" in
     args=(--url "$url")
     [[ -n "$user" ]] && args+=(-u "$user")
     (( withpass )) && { ask_pass; args+=(-p); }
-    kx add "${args[@]}" "$path" && echo "added: $path"
+    kx add "${args[@]}" "$path"
+    EXTRA=()
+    [[ -n "$key" ]] && kx attachment-import "$path" ssh-key "$key" >/dev/null
+    echo "added: $path"
+    ;;
+  ssh|telnet)
+    # -d <server>: any server, credentials from the root entry "default".
+    TARGET=""
+    if [[ "${1:-}" == -d ]]; then TARGET="${2:-}"; [[ -n "$TARGET" ]] || die "$cmd -d: server required"; shift; fi
+    [[ -n "${1:-}" ]] || die "$cmd: query required"
+    remote "$cmd" "$@"
     ;;
   ls)
     kx ls -R -f ${1:+"$1"} | grep -v '/$'

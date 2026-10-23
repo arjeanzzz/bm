@@ -27,6 +27,37 @@ bm rm example               # moves to the KeePass recycle bin
 
 When a query matches several entries, `bm` shows a numbered list and asks you to choose.
 
+## SSH and telnet
+
+```
+bm add ssh://root@srv1.lan:2222 -p              # password
+bm add ssh://deploy@srv2.lan -k ~/.ssh/id_srv2  # private key as attachment "ssh-key"
+bm add ssh://web@srv3.lan -p -k ~/.ssh/id_web   # key, then password as fallback
+bm add telnet://sw1.lan:23 -u admin -p
+
+bm ssh srv1                 # extra arguments go to ssh: bm ssh srv2 uptime
+bm telnet sw1
+```
+
+- The username comes from the entry, or from `user@` in the URL.
+- `bm ssh` loads the entry's key into `ssh-agent` for `BM_KEY_TTL` seconds (default
+  600). The key is never written to disk.
+- If the entry has a password, `bm` gives it to ssh through `SSH_ASKPASS`. ssh tries
+  keys first (the agent, `~/.ssh`), then the password. Other prompts, such as host key
+  confirmation, still go to you.
+- `bm telnet` uses `expect`: it sends the username at the `login:` prompt and the
+  password at the `Password:` prompt, then gives you the session.
+
+### Default entry
+
+`bm ssh -d <[user@]host[:port]>` and `bm telnet -d <host[:port]>` connect to a server
+that has no entry. They use the username, key and password of the root entry `default`:
+
+```
+bm add ssh://default -t default -u ops -p -k ~/.ssh/id_ops
+bm ssh -d 10.0.0.5:2200
+```
+
 ## Touch ID
 
 `bm keychain on` stores the master password in the macOS login Keychain. After that,
@@ -45,6 +76,7 @@ through `security` directly. If that matters, do not use `bm keychain on`.
 | `BM_DB`           | `~/.config/bm/bookmarks.kdbx`     |
 | `BM_KEYFILE`      | none                              |
 | `BM_CLIP_TIMEOUT` | `20` (seconds)                    |
+| `BM_KEY_TTL`      | `600` (seconds in ssh-agent)      |
 
 ## Test
 
