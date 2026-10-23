@@ -118,7 +118,8 @@ one Touch ID valid for 1 hour, or until the screen locks; add `--no-lock` to kee
 when the screen locks. `bm lock` forgets it at once. To change these, run
 `bm keychain on` again. They are stored in the Keychain item with the master password,
 not in the environment or the config file, so another program cannot raise them. The
-cached approval is signed with the master password, so a program cannot forge it.
+cached approval is signed with a random key that `bm keychain on` stores in the same
+Keychain item, so a program can neither forge it nor use it to guess the master password.
 
 Limits:
 
@@ -148,7 +149,7 @@ which `security` could read, with a new one that only the helper can read.
    `/usr/local/bin/bm`.
 3. Run `bm keychain on` again, because the access rule is bound to the helper's code
    signature. Add `--ttl 3600` for the old one-hour cache. Until then `bm` asks for
-   Touch ID for every command: an item from 1.1 has no cache setting.
+   Touch ID for every command: an item from 1.1 has no cache setting and no cache key.
 4. Remove `BM_TOUCHID_TTL` and `BM_TOUCHID_LOCK` from `~/.config/bm/config`. `bm`
    ignores them there (with a warning) and in the environment.
 5. The config file is no longer run as Bash code, see Settings.
@@ -183,3 +184,8 @@ The Touch ID cache is not a setting: use `bm keychain on --ttl` (see Touch ID).
 
 `make test` runs a smoke test on a temporary database. It uses the system clipboard
 for a few seconds.
+
+It cannot show a Touch ID dialog, so it checks only that the helper refuses: no Touch ID,
+forged or old cache files. A working cache needs a real Touch ID and is not tested:
+after changes to the helper, check by hand that `bm keychain on --ttl 60`, then two
+`bm ls`, ask for Touch ID only once.

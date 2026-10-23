@@ -8,12 +8,13 @@
 // The Keychain item trusts only this binary, so `security find-generic-password -w`
 // and other programs get a macOS dialog that asks for the login password.
 //
-// The item holds JSON {"password", "ttl", "lock"}, so only someone who knows the master
-// password can change the cache settings; the environment cannot. A cached approval
-// lives for ttl seconds (0 = no cache) and ends early when the screen locks if lock is
-// true. It is a state file "pid expiry hmac" plus a running holder process with that pid.
-// The HMAC is keyed with the master password, so a program without it cannot forge an
-// approval.
+// The item holds JSON {"password", "ttl", "lock", "key"}, so only someone who knows the
+// master password can change the cache settings; the environment cannot. A cached
+// approval lives for ttl seconds (0 = no cache) and ends early when the screen locks if
+// lock is true. It is a state file "pid expiry hmac" plus a running holder process with
+// that pid. The HMAC is keyed with "key", 32 random bytes made by `set` that only this
+// helper can read, so the state file (readable by your programs) gives nothing to guess
+// offline and a program cannot forge an approval.
 import CryptoKit
 import Foundation
 import LocalAuthentication
@@ -43,17 +44,20 @@ func query(_ service: String, _ account: String) -> [String: Any] {
      kSecAttrAccount as String: account]
 }
 
-func readItem(_ service: String, _ account: String) -> (password: String, ttl: Int, lock: Bool)? {
+func readItem(_ service: String, _ account: String) -> (password: String, ttl: Int, lock: Bool, key: Data?)? {
     var q = query(service, account)
     q[kSecReturnData as String] = true
     q[kSecMatchLimit as String] = kSecMatchLimitOne
     var out: CFTypeRef?
     guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let data = out as? Data else { return nil }
     if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let p = j["password"] as? String {
-        return (p, j["ttl"] as? Int ?? 0, j["lock"] as? Bool ?? true)
+        // An item without a cache key never gets a cache.
+        guard let k = (j["key"] as? String).flatMap({ Data(base64Encoded: $0) }), k.count == 32 else { return (p, 0, true, nil) }
+        return (p, j["ttl"] as? Int ?? 0, j["lock"] as? Bool ?? true, k)
     }
     // An item from bm 1.1 holds the bare password: no cache.
-    return String(data: data, encoding: .utf8).map { ($0, 0, true) }
+    guard let p = String(data: data, encoding: .utf8) else { return nil }
+    return (p, 0, true, nil)
 }
 
 func storeItem(_ service: String, _ account: String, _ password: String, _ ttl: Int, _ lock: Bool) {
@@ -64,9 +68,13 @@ func storeItem(_ service: String, _ account: String, _ password: String, _ ttl: 
     guard SecTrustedApplicationCreateFromPath(nil, &me) == errSecSuccess, let me,
           SecAccessCreate("bm master password" as CFString, [me] as CFArray, &access) == errSecSuccess, let access
     else { fail("cannot create Keychain access rule", 5) }
+    // A new key for every `set` also ends any approval made with the old one.
+    var key = Data(count: 32)
+    guard key.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess
+    else { fail("cannot make a random key", 5) }
     var item = query(service, account)
     item[kSecValueData as String] = try! JSONSerialization.data(
-        withJSONObject: ["password": password, "ttl": ttl, "lock": lock] as [String: Any])
+        withJSONObject: ["password": password, "ttl": ttl, "lock": lock, "key": key.base64EncodedString()] as [String: Any])
     item[kSecAttrAccess as String] = access
     item[kSecAttrLabel as String] = "bm"
     let status = SecItemAdd(item as CFDictionary, nil)
@@ -75,10 +83,24 @@ func storeItem(_ service: String, _ account: String, _ password: String, _ ttl: 
 
 // MARK: Cached approval
 
-func mac(_ password: String, _ pid: pid_t, _ expiry: Int) -> String {
-    let code = HMAC<SHA256>.authenticationCode(for: Data("\(pid):\(expiry)".utf8),
-                                               using: SymmetricKey(data: Data(password.utf8)))
+func message(_ pid: pid_t, _ expiry: Int) -> Data { Data("\(pid):\(expiry)".utf8) }
+
+func mac(_ key: Data, _ pid: pid_t, _ expiry: Int) -> String {
+    let code = HMAC<SHA256>.authenticationCode(for: message(pid, expiry), using: SymmetricKey(data: key))
     return code.map { String(format: "%02x", $0) }.joined()
+}
+
+func hexData(_ s: String) -> Data? {
+    guard s.count == 64 else { return nil }
+    var d = Data()
+    var i = s.startIndex
+    while i < s.endIndex {
+        let j = s.index(i, offsetBy: 2)
+        guard let b = UInt8(s[i..<j], radix: 16) else { return nil }
+        d.append(b)
+        i = j
+    }
+    return d
 }
 
 func readState() -> (pid: pid_t, expiry: Int, mac: String)? {
@@ -88,13 +110,15 @@ func readState() -> (pid: pid_t, expiry: Int, mac: String)? {
     return (pid, exp, f[2].trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
-func cacheValid(_ password: String, _ ttl: Int) -> Bool {
-    guard ttl > 0, let st = readState(), kill(st.pid, 0) == 0, exePath(st.pid) == me,
-          Int(Date().timeIntervalSince1970) < st.expiry else { return false }
-    return st.mac == mac(password, st.pid, st.expiry)
+func cacheValid(_ key: Data?, _ ttl: Int) -> Bool {
+    guard ttl > 0, let key, let st = readState(), kill(st.pid, 0) == 0, exePath(st.pid) == me,
+          Int(Date().timeIntervalSince1970) < st.expiry, let tag = hexData(st.mac) else { return false }
+    // Constant time compare.
+    return HMAC<SHA256>.isValidAuthenticationCode(tag, authenticating: message(st.pid, st.expiry),
+                                                  using: SymmetricKey(data: key))
 }
 
-func startHolder(_ password: String, _ ttl: Int, _ lock: Bool) {
+func startHolder(_ key: Data, _ ttl: Int, _ lock: Bool) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: me)
     // Anyone can start a holder with any arguments; without the HMAC it approves nothing.
@@ -109,7 +133,7 @@ func startHolder(_ password: String, _ ttl: Int, _ lock: Bool) {
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                              attributes: [.posixPermissions: 0o700])
     FileManager.default.createFile(atPath: stateFile.path,
-                                   contents: "\(p.processIdentifier) \(expiry) \(mac(password, p.processIdentifier, expiry))\n".data(using: .utf8),
+                                   contents: "\(p.processIdentifier) \(expiry) \(mac(key, p.processIdentifier, expiry))\n".data(using: .utf8),
                                    attributes: [.posixPermissions: 0o600])
 }
 
@@ -160,17 +184,17 @@ case "--hold" where args.count >= 4:
 case "--forget":
     forget()
 case "set" where args.count >= 6:
-    guard let ttl = Int(args[4]), ttl >= 0, args[5] == "0" || args[5] == "1" else { fail(usage, 64) }
+    guard let ttl = Int(args[4]), (0...999_999_999).contains(ttl), args[5] == "0" || args[5] == "1" else { fail(usage, 64) }
     guard let password = readLine(strippingNewline: true), !password.isEmpty else { fail("no password on stdin", 1) }
     storeItem(args[2], args[3], password, ttl, args[5] == "1")
     forget()
 case "get" where args.count >= 4:
     guard let item = readItem(args[2], args[3]) else { fail("no Keychain item", 4) }
-    if !cacheValid(item.password, item.ttl) {
+    if !cacheValid(item.key, item.ttl) {
         // Tests set this to check the cache without a Touch ID dialog. It can only deny.
         if env["BM_TOUCHID_NONINTERACTIVE"] == "1" { exit(3) }
         guard touchID(args.count > 4 ? args[4] : "unlock") else { exit(1) }
-        if item.ttl > 0 { startHolder(item.password, item.ttl, item.lock) }
+        if item.ttl > 0, let key = item.key { startHolder(key, item.ttl, item.lock) }
     }
     print(item.password)
 default:

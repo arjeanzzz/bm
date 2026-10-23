@@ -140,7 +140,8 @@ out="$(printf '%s\n' "$mp" | "$tbm" plink -d 10.0.0.7 2>&1)"
 grep -q 'plink -ssh -agent -l ops -pwfile /dev/fd/[0-9]* 10.0.0.7' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL plink -d: $out"; exit 1; }
 
 # Keychain + Touch ID cache, without a Touch ID dialog: NONINTERACTIVE makes the
-# helper fail instead of asking; a valid cache is made by hand with the known password.
+# helper fail instead of asking. A valid cache needs one real Touch ID (its HMAC key is
+# random and only the helper can read it), so only refusals are tested here.
 if [[ -x ./bm-touchid ]]; then
   export BM_TOUCHID_STATE="$tmp/touchid.state" BM_TOUCHID_NONINTERACTIVE=1
   # || true: under set -e a missing item would end the trap before rm.
@@ -150,28 +151,20 @@ if [[ -x ./bm-touchid ]]; then
   if printf 'y\n%s\n' "$mp" | ./bm keychain on --ttl abc >/dev/null 2>&1; then echo "FAIL keychain: --ttl abc accepted"; exit 1; fi
   security find-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1 || { echo "FAIL keychain: no item"; exit 1; }
 
-  # A live holder (its pid in hp) and a state file signed with the known password.
+  # A live holder (its pid in hp).
   hold() { hp="$(./bm-touchid --hold 60 1 </dev/null >/dev/null 2>&1 & echo $!)"; sleep 1; exp=$(( $(date +%s) + 60 )); }
-  valid_state() { echo "$hp $exp $(printf '%s' "$hp:$exp" | openssl dgst -sha256 -hmac "$mp" -r | cut -d' ' -f1)" > "$BM_TOUCHID_STATE"; }
 
-  # A forged cache with a live holder must not work.
-  hold
-  echo "$hp $exp 00" > "$BM_TOUCHID_STATE"
-  if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: forged cache accepted"; exit 1; fi
-
-  # The item says ttl 0 (the default): a valid cache is refused, whatever env and config say.
-  valid_state
-  echo BM_TOUCHID_TTL=3600 >"$BM_CONFIG"
-  if BM_TOUCHID_TTL=3600 BM_TOUCHID_LOCK=0 ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: cache from BM_TOUCHID_TTL"; exit 1; fi
-  rm "$BM_CONFIG"
-
-  # --ttl 60 goes into the item, then a valid cache works.
+  # The item allows a cache (--ttl 60) and the holder lives, so only the tag decides:
+  # a forged one, and one keyed with the master password (bm 1.2 before the random key).
   printf 'y\n%s\n' "$mp" | ./bm keychain on --ttl 60 >/dev/null 2>&1
-  hold; valid_state
-  ./bm ls </dev/null | grep -q '^default$' || { echo "FAIL keychain: valid cache rejected"; exit 1; }
+  hold
+  echo "$hp $exp $(printf '%064d' 0)" > "$BM_TOUCHID_STATE"
+  if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: forged cache accepted"; exit 1; fi
+  echo "$hp $exp $(printf '%s' "$hp:$exp" | openssl dgst -sha256 -hmac "$mp" -r | cut -d' ' -f1)" > "$BM_TOUCHID_STATE"
+  if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: cache keyed with the master password accepted"; exit 1; fi
 
   ./bm lock >/dev/null
-  if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: works after bm lock"; exit 1; fi
+  [[ ! -e "$BM_TOUCHID_STATE" ]] || { echo "FAIL keychain: state file left after bm lock"; exit 1; }
   ./bm keychain off >/dev/null
   security find-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1 && { echo "FAIL keychain off"; exit 1; }
   unset BM_TOUCHID_NONINTERACTIVE
