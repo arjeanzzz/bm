@@ -32,6 +32,8 @@ Usage: bm <command> [args]
   ssh -d <[user@]host[:port]>   connect to any server with the "default" entry
   telnet <query>                connect and log in with the entry's password
   telnet -d <host[:port]>       same, with the "default" entry
+  plink <query> [plink args]    PuTTY plink over ssh, for old devices with legacy ciphers
+  plink -d <[user@]host[:port]> same, with the "default" entry
   edit <query> [-t title] [-u user] [--url url] [-p]
                                 change an entry
   rm <query>                    move an entry to the recycle bin
@@ -100,10 +102,19 @@ remote() {
   host="${t%%:*}"; port=""; [[ "$t" == *:* ]] && port="${t##*:}"
   [[ -n "$host" ]] || die "no host in $e"
 
-  if [[ "$proto" == ssh ]]; then
+  if [[ "$proto" == ssh || "$proto" == plink ]]; then
     # ponytail: key goes to ssh-agent for KEY_TTL seconds, never to disk.
     if kx attachment-export --stdout "$e" ssh-key 2>/dev/null | ssh-add -q -t "${BM_KEY_TTL:-600}" - 2>/dev/null; then
       echo "key from $e loaded into ssh-agent for ${BM_KEY_TTL:-600}s" >&2
+    fi
+    if [[ "$proto" == plink ]]; then
+      # plink takes keys from ssh-agent (SSH_AUTH_SOCK), then the password from a pipe,
+      # so the password is not in argv and not on disk.
+      local args=(-ssh -agent)
+      [[ -n "$port" ]] && args+=(-P "$port")
+      [[ -n "$user" ]] && args+=(-l "$user")
+      [[ -n "$pw" ]] && args+=(-pwfile <(printf '%s\n' "$pw"))
+      exec plink "${args[@]}" "$host" "$@"
     fi
     # ssh tries keys first (agent, ~/.ssh), then the password.
     if [[ -n "$pw" ]]; then
@@ -181,7 +192,7 @@ case "$cmd" in
     [[ -n "$key" ]] && kx attachment-import "$path" ssh-key "$key" >/dev/null
     echo "added: $path"
     ;;
-  ssh|telnet)
+  ssh|telnet|plink)
     # -d <server>: any server, credentials from the root entry "default".
     TARGET=""
     if [[ "${1:-}" == -d ]]; then TARGET="${2:-}"; [[ -n "$TARGET" ]] || die "$cmd -d: server required"; shift; fi

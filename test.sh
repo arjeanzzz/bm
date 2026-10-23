@@ -45,6 +45,10 @@ cat >"$fake/telnet" <<'EOF'
 #!/bin/bash
 echo "telnet $*"; printf 'login: '; read -r u; printf 'Password: '; read -r p; echo "got $u/$p"
 EOF
+cat >"$fake/plink" <<'EOF2'
+#!/bin/bash
+echo "plink $*"; while [[ $# -gt 0 ]]; do [[ "$1" == -pwfile ]] && echo "pw: $(cat "$2")"; shift; done
+EOF2
 chmod +x "$fake"/*
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/k"
 
@@ -71,5 +75,10 @@ grep -q 'args: -p 2200 -l ops 10.0.0.5' <<<"$out" && grep -q 'pw: dpw' <<<"$out"
 
 out="$({ printf '%s\n' "$mp"; sleep 2; } | PATH="$fake:$PATH" ./bm telnet sw1 2>&1)"
 grep -q 'telnet sw1.lan 23' <<<"$out" && grep -q 'got admin/pw3' <<<"$out" || { echo "FAIL telnet: $out"; exit 1; }
+
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm plink srv1 2>&1)"
+grep -q 'plink -ssh -agent -P 2222 -l root -pwfile /dev/fd/[0-9]* srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL plink: $out"; exit 1; }
+out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm plink -d 10.0.0.7 2>&1)"
+grep -q 'plink -ssh -agent -l ops -pwfile /dev/fd/[0-9]* 10.0.0.7' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL plink -d: $out"; exit 1; }
 
 echo OK

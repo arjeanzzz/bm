@@ -48,9 +48,22 @@ bm telnet sw1
 - `bm telnet` uses `expect`: it sends the username at the `login:` prompt and the
   password at the `Password:` prompt, then gives you the session.
 
+### plink (old devices)
+
+`bm plink <query>` connects with PuTTY `plink -ssh`. Use it for old switches that
+modern OpenSSH refuses because of legacy key exchange, ciphers or host keys.
+
+1. Install PuTTY: `brew install putty`.
+2. Connect: `bm plink sw-old` or `bm plink -d 10.0.0.7`.
+
+- plink takes the key from `ssh-agent`, the same as `bm ssh`.
+- plink reads the password from a pipe (`-pwfile /dev/fd/N`). The password is not in
+  argv and not on disk.
+- When the device offers a weak cipher, plink asks you to confirm it. Answer `y`.
+
 ### Default entry
 
-`bm ssh -d <[user@]host[:port]>` and `bm telnet -d <host[:port]>` connect to a server
+`bm ssh -d`, `bm plink -d` and `bm telnet -d` connect to a server
 that has no entry. They use the username, key and password of the root entry `default`:
 
 ```
