@@ -6,7 +6,7 @@ set -euo pipefail
 CONFIG="${BM_CONFIG:-$HOME/.config/bm/config}"
 if [[ -f "$CONFIG" ]]; then set -a; source "$CONFIG"; set +a; fi
 
-BM_VERSION="1.0"
+BM_VERSION="1.1"
 DB="${BM_DB:-$HOME/.config/bm/bookmarks.kdbx}"
 CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
@@ -61,8 +61,8 @@ master() {
   [[ -n "$MP" ]] && return
   if security find-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1; then
     [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
-    "$TOUCHID" "unlock bookmarks" || die "Touch ID failed"
-    MP="$(security find-generic-password -s "$KC_SERVICE" -a "$DB" -w)"
+    # Only bm-touchid can read the item; it prints the password after Touch ID.
+    MP="$("$TOUCHID" get "$KC_SERVICE" "$DB" "unlock bookmarks")" || die "Touch ID failed"
   else
     read -rsp "Master password: " MP; echo >&2
   fi
@@ -297,18 +297,21 @@ case "$cmd" in
         [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
         cat >&2 <<'EOF'
 WARNING: use this only on a trusted Mac.
-Any program that runs as your user can read the master password from Keychain
-with `security find-generic-password -w`, without Touch ID.
-Without Keychain, bm asks for the master password every time (bm keychain off).
+Only bm-touchid can read the stored master password, after Touch ID.
+But while one Touch ID approval is cached (BM_TOUCHID_TTL, default 1 hour),
+any program that runs as your user can run bm without Touch ID.
+On an untrusted Mac set BM_TOUCHID_TTL=0 or do not use Keychain.
 EOF
         read -rp "Store the master password in Keychain? [y/N] " a
         [[ "$a" == y || "$a" == Y ]] || exit 0
         read -rsp "Master password: " MP; echo >&2
         # Check the password before storing it.
         kx ls >/dev/null || die "wrong master password"
-        # -w as the last argument makes security prompt, so the password never goes into argv.
-        printf '%s\n%s\n' "$MP" "$MP" | security add-generic-password -U -s "$KC_SERVICE" -a "$DB" -w >/dev/null
-        echo "master password stored in Keychain, Touch ID required to use it"
+        # Drop an old item made by `security` (it trusts `security`), then let the
+        # helper create a new one that trusts only the helper.
+        security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1 || true
+        printf '%s\n' "$MP" | "$TOUCHID" set "$KC_SERVICE" "$DB" || die "cannot store in Keychain"
+        echo "master password stored in Keychain, only bm-touchid can read it after Touch ID"
         ;;
       off)
         [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget

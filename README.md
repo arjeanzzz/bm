@@ -82,11 +82,8 @@ If there is no `default` entry either, it connects without saved credentials.
 | Mode | Setup | Master password |
 |---|---|---|
 | Untrusted Mac (default) | nothing | typed every time |
-| Trusted Mac | `bm keychain on` | Keychain + Touch ID, cached for 1 hour |
-
-On an untrusted Mac do not use `bm keychain on`. `BM_TOUCHID_TTL=0` does not help
-there: any program that runs as your user can read the Keychain item with
-`security find-generic-password -w` without Touch ID.
+| Untrusted Mac, with Touch ID | `bm keychain on` + `BM_TOUCHID_TTL=0` | Keychain, Touch ID for every command |
+| Trusted Mac | `bm keychain on` | Keychain, one Touch ID per hour |
 
 ## Touch ID
 
@@ -94,14 +91,33 @@ there: any program that runs as your user can read the Keychain item with
 `bm` asks for Touch ID (or the login password) instead of the master password.
 `bm keychain off` removes it.
 
+The Keychain item trusts only the `bm-touchid` helper. Any other program, including
+`security find-generic-password -w`, gets a macOS dialog that asks for your login
+password. If you did not start such a request, click **Deny**.
+
 One Touch ID stays valid for 1 hour, or until the screen locks. `bm lock` forgets it
 at once. Change this with `BM_TOUCHID_TTL` (seconds, `0` = ask every time) and
-`BM_TOUCHID_LOCK=0` (keep the approval when the screen locks).
+`BM_TOUCHID_LOCK=0` (keep the approval when the screen locks). The cached approval
+is signed with the master password, so a program cannot forge it.
 
-Limit: Touch ID is checked by the `bm-touchid` helper, not by a Keychain access rule.
-It protects against a person at your unlocked Mac. It does not protect against
-malware that runs as your user, because such a program can read the Keychain item
-through `security` directly. If that matters, do not use `bm keychain on`.
+Limits:
+
+- While an approval is cached, any program that runs as your user can run `bm`
+  (or `bm-touchid get`) without Touch ID. On an untrusted Mac use `BM_TOUCHID_TTL=0`.
+- The access rule is bound to the helper's code signature. After you rebuild
+  `bm-touchid` (`make`), run `bm keychain on` again. Otherwise macOS asks for your
+  login password the next time the new helper reads the item.
+- Any program can delete the Keychain item. It cannot read it; `bm` then asks for the
+  master password again.
+- The helper uses the legacy Keychain access API (`SecAccess`, deprecated since
+  macOS 10.10). A stronger, hardware-enforced variant is tracked in #3.
+- The helper is signed with hardened runtime, so other programs cannot inject code
+  into it (`DYLD_INSERT_LIBRARIES`) or attach a debugger.
+
+### After updating from bm 1.0
+
+Run `make install`, then `bm keychain on` again. This replaces the old Keychain item,
+which `security` could read, with a new one that only the helper can read.
 
 ## Settings
 

@@ -100,6 +100,31 @@ grep -q 'plink -ssh -agent -P 2222 -l root -pwfile /dev/fd/[0-9]* srv1.lan' <<<"
 out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm plink -d 10.0.0.7 2>&1)"
 grep -q 'plink -ssh -agent -l ops -pwfile /dev/fd/[0-9]* 10.0.0.7' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL plink -d: $out"; exit 1; }
 
-[[ "$(./bm --version)" == "bm 1.0" ]] || { echo "FAIL version"; exit 1; }
+# Keychain + Touch ID cache, without a Touch ID dialog: NONINTERACTIVE makes the
+# helper fail instead of asking; a valid cache is made by hand with the known password.
+if [[ -x ./bm-touchid ]]; then
+  export BM_TOUCHID_STATE="$tmp/touchid.state" BM_TOUCHID_NONINTERACTIVE=1
+  trap './bm-touchid --forget; security delete-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1; rm -rf "$tmp"' EXIT
+  printf 'y\n%s\n' "$mp" | ./bm keychain on >/dev/null 2>&1
+  if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: worked without Touch ID"; exit 1; fi
+
+  # A forged cache with a live holder must not work.
+  (BM_TOUCHID_TTL=60 ./bm-touchid --hold 60 </dev/null >/dev/null 2>&1 &); sleep 1
+  hp="$(pgrep -f 'bm-touchid --hold 60' | tail -1)"; exp=$(( $(date +%s) + 60 ))
+  echo "$hp $exp 00" > "$BM_TOUCHID_STATE"
+  if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: forged cache accepted"; exit 1; fi
+
+  m="$(printf '%s' "$hp:$exp" | openssl dgst -sha256 -hmac "$mp" -r | cut -d' ' -f1)"
+  echo "$hp $exp $m" > "$BM_TOUCHID_STATE"
+  ./bm ls </dev/null | grep -q '^default$' || { echo "FAIL keychain: valid cache rejected"; exit 1; }
+
+  ./bm lock >/dev/null
+  if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: works after bm lock"; exit 1; fi
+  ./bm keychain off >/dev/null
+  security find-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1 && { echo "FAIL keychain off"; exit 1; }
+  unset BM_TOUCHID_NONINTERACTIVE
+fi
+
+[[ "$(./bm --version)" == "bm 1.1" ]] || { echo "FAIL version"; exit 1; }
 
 echo OK
