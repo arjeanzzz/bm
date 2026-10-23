@@ -55,7 +55,7 @@ bm add ssh://deploy@srv2.lan -k ~/.ssh/id_srv2  # private key as attachment "ssh
 bm add ssh://web@srv3.lan -p -k ~/.ssh/id_web   # key, then password as fallback
 bm add telnet://sw1.lan:23 -u admin -p
 
-bm ssh srv1                 # extra arguments go to ssh: bm ssh srv2 uptime
+bm ssh srv1                 # more arguments are the remote command: bm ssh srv2 uptime
 bm telnet sw1
 ```
 
@@ -63,10 +63,17 @@ bm telnet sw1
 - `bm ssh` loads the entry's key into `ssh-agent` for `BM_KEY_TTL` seconds (default
   600). The key is never written to disk.
 - If the entry has a password, `bm` gives it to ssh through `SSH_ASKPASS`. ssh tries
-  keys first (the agent, `~/.ssh`), then the password. Other prompts, such as host key
-  confirmation, still go to you.
+  keys first (the agent, `~/.ssh`), then the password. The password is not in the
+  environment (ssh passes that on to `ProxyCommand` and `Match exec`): it waits in a
+  file only you can read, which the first password prompt deletes (after 60 s at the
+  latest). Other prompts, such as host key confirmation, a key passphrase or a second
+  password try, go to you.
+- `bm` puts `--` before the host, so more arguments are the remote command, not ssh
+  options; put ssh options into `~/.ssh/config`. A host or port that starts with `-`
+  is refused.
 - `bm telnet` uses `expect`: it sends the username at the `login:` prompt and the
-  password at the `Password:` prompt, then gives you the session.
+  password at the `Password:` prompt, then gives you the session. The password goes to
+  `expect` through a pipe, not the environment.
 
 ### plink (old devices)
 

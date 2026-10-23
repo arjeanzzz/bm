@@ -67,7 +67,11 @@ if printf 'wrong\n' | ./bm ls >/dev/null 2>&1; then echo "FAIL wrong password ac
 fake="$tmp/fake"; mkdir "$fake"
 cat >"$fake/ssh" <<'EOF'
 #!/bin/bash
-echo "args: $*"; [[ -n "${SSH_ASKPASS:-}" ]] && echo "pw: $("$SSH_ASKPASS" "root@h's password: ")"
+echo "args: $*"; env >"$(dirname "$0")/ssh.env"
+if [[ -n "${SSH_ASKPASS:-}" ]]; then
+  echo "pw: $("$SSH_ASKPASS" "root@h's password: ")"
+  [[ -e "$BM_ASKPASS" ]] && echo "pw file left"
+fi
 true
 EOF
 cat >"$fake/ssh-add" <<'EOF'
@@ -76,7 +80,7 @@ grep -q 'BEGIN OPENSSH PRIVATE KEY' && echo "agent got key"
 EOF
 cat >"$fake/telnet" <<'EOF'
 #!/bin/bash
-echo "telnet $*"; printf 'login: '; read -r u; printf 'Password: '; read -r p; echo "got $u/$p"
+echo "telnet $*"; env >"$(dirname "$0")/telnet.env"; printf 'login: '; read -r u; printf 'Password: '; read -r p; echo "got $u/$p"
 EOF
 cat >"$fake/plink" <<'EOF2'
 #!/bin/bash
@@ -108,10 +112,13 @@ sleep 1
 [[ "$(pbpaste)" == pw1 ]] || { echo "FAIL show -s clipboard"; exit 1; }
 
 out="$(printf '%s\n' "$mp" | "$tbm" ssh srv1 2>&1)"
-grep -q 'args: -p 2222 -l root srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL ssh pw: $out"; exit 1; }
+grep -q 'args: -p 2222 -l root -- srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL ssh pw: $out"; exit 1; }
+# Not in the environment that ssh passes on, and the file is gone after the first prompt.
+grep -q pw1 "$fake/ssh.env" && { echo "FAIL ssh: password in the environment"; exit 1; }
+grep -q 'pw file left' <<<"$out" && { echo "FAIL ssh: password file left"; exit 1; }
 
 out="$(printf '%s\n' "$mp" | "$tbm" ssh srv2 uptime 2>&1)"
-grep -q 'agent got key' <<<"$out" && grep -q 'args: -l deploy srv2.lan uptime' <<<"$out" || { echo "FAIL ssh key: $out"; exit 1; }
+grep -q 'agent got key' <<<"$out" && grep -q 'args: -l deploy -- srv2.lan uptime' <<<"$out" || { echo "FAIL ssh key: $out"; exit 1; }
 grep -q 'pw:' <<<"$out" && { echo "FAIL ssh key entry has no password: $out"; exit 1; }
 
 # Key and password in one entry: both go to ssh, ssh tries the key first.
@@ -120,19 +127,28 @@ out="$(printf '%s\n' "$mp" | "$tbm" ssh srv3 2>&1)"
 grep -q 'agent got key' <<<"$out" && grep -q 'pw: kpw' <<<"$out" || { echo "FAIL ssh key+pw: $out"; exit 1; }
 
 out="$(printf '%s\n' "$mp" | "$tbm" ssh 10.9.9.9 2>&1)"
-grep -q 'without saved credentials' <<<"$out" && grep -q 'args: 10.9.9.9$' <<<"$out" || { echo "FAIL fallback no default: $out"; exit 1; }
+grep -q 'without saved credentials' <<<"$out" && grep -q 'args: -- 10.9.9.9$' <<<"$out" || { echo "FAIL fallback no default: $out"; exit 1; }
 if printf '%s\n' "$mp" | "$tbm" ssh -d any.lan >/dev/null 2>&1; then echo "FAIL -d without default"; exit 1; fi
 printf '%s\n%s\n%s\n' "$mp" dpw dpw | ./bm add ssh://default -t default -u ops -p >/dev/null
 out="$(printf '%s\n' "$mp" | "$tbm" ssh -d 10.0.0.5:2200 2>&1)"
-grep -q 'args: -p 2200 -l ops 10.0.0.5' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL ssh -d: $out"; exit 1; }
+grep -q 'args: -p 2200 -l ops -- 10.0.0.5' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL ssh -d: $out"; exit 1; }
 out="$(printf '%s\n' "$mp" | "$tbm" ssh -d root@1.2.3.4 2>&1)"
-grep -q 'args: -l root 1.2.3.4' <<<"$out" || { echo "FAIL ssh -d user@: $out"; exit 1; }
+grep -q 'args: -l root -- 1.2.3.4' <<<"$out" || { echo "FAIL ssh -d user@: $out"; exit 1; }
 out="$(printf '%s\n' "$mp" | "$tbm" ssh admin@10.0.0.9 2>&1)"
-grep -q "using 'default'" <<<"$out" && grep -q 'args: -l admin 10.0.0.9' <<<"$out" && grep -q 'pw: dpw' <<<"$out" \
+grep -q "using 'default'" <<<"$out" && grep -q 'args: -l admin -- 10.0.0.9' <<<"$out" && grep -q 'pw: dpw' <<<"$out" \
   || { echo "FAIL fallback to default: $out"; exit 1; }
 
 out="$({ printf '%s\n' "$mp"; sleep 2; } | "$tbm" telnet sw1 2>&1)"
 grep -q 'telnet sw1.lan 23' <<<"$out" && grep -q 'got admin/pw3' <<<"$out" || { echo "FAIL telnet: $out"; exit 1; }
+grep -q pw3 "$fake/telnet.env" && { echo "FAIL telnet: password in the environment"; exit 1; }
+
+# A host or port that starts with - is refused, it would be an option.
+for c in ssh plink telnet; do
+  out="$(printf '%s\n' "$mp" | "$tbm" "$c" -d "-oProxyCommand=touch $tmp/pwned" 2>&1)" && { echo "FAIL $c: option as host: $out"; exit 1; }
+  grep -q 'bad host' <<<"$out" || { echo "FAIL $c: option as host: $out"; exit 1; }
+done
+out="$(printf '%s\n' "$mp" | "$tbm" telnet -d sw1.lan:-n 2>&1)" && { echo "FAIL telnet: option as port: $out"; exit 1; }
+grep -q 'bad port' <<<"$out" || { echo "FAIL telnet: option as port: $out"; exit 1; }
 
 out="$(printf '%s\n' "$mp" | "$tbm" plink srv1 2>&1)"
 grep -q 'plink -ssh -agent -P 2222 -l root -pwfile /dev/fd/[0-9]* srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL plink: $out"; exit 1; }

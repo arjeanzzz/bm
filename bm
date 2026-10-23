@@ -61,11 +61,11 @@ Usage: bm <command> [args]
                                 -s asks, then shows the password and copies it
   pass <query>                  copy the password to the clipboard
   user <query>                  copy the username to the clipboard
-  ssh <query> [ssh args]        connect with the entry's key or password
+  ssh <query> [command]         connect with the entry's key or password
   ssh -d <[user@]host[:port]>   connect to any server with the "default" entry
   telnet <query>                connect and log in with the entry's password
   telnet -d <host[:port]>       same, with the "default" entry
-  plink <query> [plink args]    PuTTY plink over ssh, for old devices with legacy ciphers
+  plink <query> [command]       PuTTY plink over ssh, for old devices with legacy ciphers
   plink -d <[user@]host[:port]> same, with the "default" entry
   edit <query> [-t title] [-u user] [--url url] [-p]
                                 change an entry
@@ -149,6 +149,9 @@ remote() {
   fi
   host="${t%%:*}"; port=""; [[ "$t" == *:* ]] && port="${t##*:}"
   [[ -n "$host" ]] || die "no host in $e"
+  # A host or port starting with - would be read as an option (-oProxyCommand=...).
+  [[ "$host" != -* ]] || die "bad host: $host"
+  [[ -z "$port" || "$port" =~ ^[0-9]+$ ]] || die "bad port: $port"
 
   if [[ "$proto" == ssh || "$proto" == plink ]]; then
     # ponytail: key goes to ssh-agent for KEY_TTL seconds, never to disk.
@@ -166,17 +169,24 @@ remote() {
     fi
     # ssh tries keys first (agent, ~/.ssh), then the password.
     if [[ -n "$pw" ]]; then
-      # ssh asks bm itself for the password; exported env does not show in argv.
-      export SSH_ASKPASS="$HERE/bm" SSH_ASKPASS_REQUIRE=force BM_ASKPASS_PW="$pw"
+      # ssh asks bm itself for the password (SSH_ASKPASS). ssh passes its environment
+      # on to ProxyCommand, Match exec etc., so only the path of a 0600 file in a 0700
+      # folder goes there; the first password prompt reads and deletes the file.
+      local d; d="$(mktemp -d "${TMPDIR:-/tmp}/bm.XXXXXXXX")"
+      (umask 077; printf '%s\n' "$pw" >"$d/pw")
+      # bm becomes ssh below, so a detached job removes the file if ssh never asks.
+      (trap '' HUP INT; sleep 60; rm -rf "$d") </dev/null >/dev/null 2>&1 &
+      export SSH_ASKPASS="$HERE/bm" SSH_ASKPASS_REQUIRE=force BM_ASKPASS="$d/pw"
     fi
-    exec ssh ${port:+-p "$port"} ${user:+-l "$user"} "$host" "$@"
+    exec ssh ${port:+-p "$port"} ${user:+-l "$user"} -- "$host" "$@"
   fi
 
   [[ -n "$pw" ]] || exec telnet "$host" ${port:+"$port"}
-  export BM_HOST="$host" BM_PORT="$port" BM_USER="$user" BM_PW="$pw"
+  # The password goes to expect on fd 3, not in the environment that telnet gets too.
+  export BM_HOST="$host" BM_PORT="$port" BM_USER="$user"
   exec expect -c '
-    set user $env(BM_USER); set pw $env(BM_PW)
-    unset env(BM_PW) env(BM_USER)
+    set user $env(BM_USER); unset env(BM_USER)
+    set f [open /dev/fd/3]; gets $f pw; close $f
     set timeout 20
     if {$env(BM_PORT) eq ""} { spawn telnet $env(BM_HOST) } else { spawn telnet $env(BM_HOST) $env(BM_PORT) }
     expect {
@@ -185,17 +195,23 @@ remote() {
       timeout {}
       eof { exit 1 }
     }
-    interact'
+    interact' 3< <(printf '%s\n' "$pw")
 }
 
 cmd="${1:-}"; [[ $# -gt 0 ]] && shift
 
-# SSH_ASKPASS mode: answer password prompts, ask the user for anything else (host key etc).
-if [[ -n "${BM_ASKPASS_PW:-}" ]]; then
-  case "$cmd" in
-    *assword*|*assphrase*) printf '%s\n' "$BM_ASKPASS_PW" ;;
-    *) printf '%s ' "$cmd" >/dev/tty; read -r a </dev/tty; echo "$a" ;;
-  esac
+# SSH_ASKPASS mode: answer the first password prompt from the file remote() made, then
+# delete it. Ask the user for anything else (host key, key passphrase, a second try).
+if [[ -n "${BM_ASKPASS:-}" ]]; then
+  if [[ "$cmd" == *assword* && -f "$BM_ASKPASS" ]]; then
+    IFS= read -r a <"$BM_ASKPASS" || true
+    rm -f "$BM_ASKPASS"; rmdir "${BM_ASKPASS%/*}" 2>/dev/null || true
+    printf '%s\n' "$a"
+  elif [[ "$cmd" == *assword* || "$cmd" == *assphrase* ]]; then
+    printf '%s' "$cmd" >/dev/tty; IFS= read -rs a </dev/tty; echo >/dev/tty; printf '%s\n' "$a"
+  else
+    printf '%s ' "$cmd" >/dev/tty; read -r a </dev/tty; echo "$a"
+  fi
   exit 0
 fi
 
