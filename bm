@@ -1,23 +1,74 @@
-#!/bin/bash
+#!/bin/bash -p
 # bm - terminal bookmark manager on top of keepassxc-cli and a KeePass .kdbx file.
+# bash -p ignores BASH_ENV, SHELLOPTS and functions exported by the caller.
 set -euo pipefail
+# Fixed PATH, system folders first: a program that runs as you cannot slip in a fake
+# keepassxc-cli, pbcopy, ssh etc. through a folder you can write to early in your PATH.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+OS="$(uname -s)"
+# keepassxc-cli runs clipboard tools by name (xclip before pbcopy, also on macOS):
+# system folders only.
+KXC_PATH="$PATH"
+# On macOS plink and telnet come from Homebrew; /opt/homebrew/bin is writable by you.
+if [[ "$OS" == Darwin ]]; then PATH="$PATH:/usr/local/bin:/opt/homebrew/bin"; else PATH="$PATH:/usr/local/bin"; fi
+export PATH
 
-# Optional settings file with BM_* lines; exported so bm-touchid sees them too.
+# Optional settings file with NAME=value lines. It is read as data, never run as code:
+# only the names below, values taken literally. A value here wins over the environment.
 CONFIG="${BM_CONFIG:-$HOME/.config/bm/config}"
-if [[ -f "$CONFIG" ]]; then set -a; source "$CONFIG"; set +a; fi
+if [[ -f "$CONFIG" ]]; then
+  n=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1)); line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    if [[ ! "$line" =~ ^(BM_DB|BM_KEYFILE|BM_CLIP_TIMEOUT|BM_KEY_TTL)=(.*)$ ]]; then
+      echo "bm: $CONFIG:$n ignored, allowed: BM_DB BM_KEYFILE BM_CLIP_TIMEOUT BM_KEY_TTL" >&2
+      continue
+    fi
+    name="${BASH_REMATCH[1]}" v="${BASH_REMATCH[2]}"
+    case "$v" in \"*\"|\'*\') v="${v:1:${#v}-2}" ;; esac
+    [[ "$v" == "~/"* ]] && v="$HOME/${v:2}"
+    export "$name=$v"
+  done <"$CONFIG"
+fi
 
-BM_VERSION="1.1"
+BM_VERSION="1.2"
 DB="${BM_DB:-$HOME/.config/bm/bookmarks.kdbx}"
 CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
 HERE="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 TOUCHID="$HERE/bm-touchid"
-KXC="$(command -v keepassxc-cli || echo /Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli)"
+if [[ "$OS" == Darwin ]]; then KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli
+else KXC="$(command -v keepassxc-cli || true)"; fi  # the distro package
+# macOS: keepassxc-cli must carry the Developer ID signature of the KeePassXC team. It
+# runs with hardened runtime and library validation, so it also loads only libraries
+# signed by that team or Apple: a replaced binary or framework is refused.
+KXC_TEAM=G2S7P7J672
 
 KEY_ARGS=()
 [[ -n "${BM_KEYFILE:-}" ]] && KEY_ARGS=(-k "$BM_KEYFILE")
 
 die() { echo "bm: $*" >&2; exit 1; }
+need_kxc() {
+  [[ -x "$KXC" ]] || die "keepassxc-cli not found${KXC:+ at $KXC}, install KeePassXC (see README)"
+  [[ "$OS" == Darwin ]] || return 0
+  codesign --verify -R="anchor apple generic and certificate leaf[subject.OU] = \"$KXC_TEAM\"" "$KXC" 2>/dev/null \
+    || die "$KXC is not signed by the KeePassXC team ($KXC_TEAM), not using it"
+}
+
+# Linux: secret-tool talks to the secret service over the D-Bus session bus. Without a
+# bus it could try to start one, so bm does not call it then.
+secret_service() {
+  command -v secret-tool >/dev/null && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" || -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]]
+}
+
+# Linux: keepassxc-cli clip needs a display and wl-copy (Wayland) or xclip (X11).
+clip_ok() {
+  [[ "$OS" == Darwin ]] && return 0
+  local tool=xclip; [[ -n "${WAYLAND_DISPLAY:-}" ]] && tool=wl-copy
+  if [[ -z "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]]; then echo "bm: no clipboard without a display" >&2; return 1; fi
+  (PATH="$KXC_PATH"; command -v "$tool" >/dev/null) || { echo "bm: no clipboard: install $tool" >&2; return 1; }
+}
 
 usage() {
   cat <<'EOF'
@@ -35,36 +86,44 @@ Usage: bm <command> [args]
                                 -s asks, then shows the password and copies it
   pass <query>                  copy the password to the clipboard
   user <query>                  copy the username to the clipboard
-  ssh <query> [ssh args]        connect with the entry's key or password
+  ssh <query> [ssh options] [command]
+                                connect with the entry's key or password
   ssh -d <[user@]host[:port]>   connect to any server with the "default" entry
   telnet <query>                connect and log in with the entry's password
   telnet -d <host[:port]>       same, with the "default" entry
-  plink <query> [plink args]    PuTTY plink over ssh, for old devices with legacy ciphers
+  plink <query> [command]       PuTTY plink over ssh, for old devices with legacy ciphers
   plink -d <[user@]host[:port]> same, with the "default" entry
   edit <query> [-t title] [-u user] [--url url] [-p]
                                 change an entry
   rm <query>                    move an entry to the recycle bin
-  keychain on|off               store or forget the master password in Keychain (Touch ID)
+  keychain on [--ttl SECONDS] [--no-lock]
+                                store the master password in Keychain (Touch ID);
+                                --ttl: seconds one Touch ID stays valid (default 0 =
+                                ask every time), --no-lock: keep it when the screen locks;
+                                Linux: in the secret service (secret-tool), no options
+  keychain off                  forget the master password in Keychain
   lock                          forget the Touch ID approval now
   version                       print the version
 
-Settings (environment or ~/.config/bm/config):
-  BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT, BM_KEY_TTL,
-  BM_TOUCHID_TTL   seconds one Touch ID stays valid, 0 = ask every time (default 3600)
-  BM_TOUCHID_LOCK  0 = keep the approval when the screen locks (default 1)
+Settings (environment or NAME=value lines in ~/.config/bm/config):
+  BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT, BM_KEY_TTL
 EOF
 }
 
-# Master password: Keychain behind Touch ID if enabled, otherwise prompt.
+# Master password: Keychain behind Touch ID (Linux: secret service) if enabled, otherwise prompt.
 MP=""
 master() {
   [[ -n "$MP" ]] && return
-  if security find-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1; then
+  if [[ "$OS" != Darwin ]]; then
+    if secret_service && MP="$(secret-tool lookup service "$KC_SERVICE" account "$DB" 2>/dev/null)" && [[ -n "$MP" ]]; then return; fi
+    IFS= read -rsp "Master password: " MP; echo >&2
+  elif security find-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1; then
     [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
     # Only bm-touchid can read the item; it prints the password after Touch ID.
-    MP="$("$TOUCHID" get "$KC_SERVICE" "$DB" "unlock bookmarks")" || die "Touch ID failed"
+    # The dialog shows who asks (bm and its arguments), the helper finds that itself.
+    MP="$("$TOUCHID" get "$KC_SERVICE" "$DB")" || die "Touch ID failed"
   else
-    read -rsp "Master password: " MP; echo >&2
+    IFS= read -rsp "Master password: " MP; echo >&2
   fi
 }
 
@@ -72,7 +131,7 @@ master() {
 kx() {
   local cmd="$1"; shift
   master
-  printf '%s\n' "$MP" "${EXTRA[@]+"${EXTRA[@]}"}" | "$KXC" "$cmd" -q "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB" "$@"
+  printf '%s\n' "$MP" "${EXTRA[@]+"${EXTRA[@]}"}" | PATH="$KXC_PATH" "$KXC" "$cmd" -q "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB" "$@"
 }
 EXTRA=()
 
@@ -90,8 +149,8 @@ resolve() {
 
 ask_pass() {
   local p1 p2
-  read -rsp "Entry password: " p1; echo >&2
-  read -rsp "Repeat: " p2; echo >&2
+  IFS= read -rsp "Entry password: " p1; echo >&2
+  IFS= read -rsp "Repeat: " p2; echo >&2
   [[ "$p1" == "$p2" ]] || die "passwords do not match"
   EXTRA=("$p1")
 }
@@ -120,6 +179,9 @@ remote() {
   fi
   host="${t%%:*}"; port=""; [[ "$t" == *:* ]] && port="${t##*:}"
   [[ -n "$host" ]] || die "no host in $e"
+  # A host or port starting with - would be read as an option (-oProxyCommand=...).
+  [[ "$host" != -* ]] || die "bad host: $host"
+  [[ -z "$port" || "$port" =~ ^[0-9]+$ ]] || die "bad port: $port"
 
   if [[ "$proto" == ssh || "$proto" == plink ]]; then
     # ponytail: key goes to ssh-agent for KEY_TTL seconds, never to disk.
@@ -132,22 +194,45 @@ remote() {
       local args=(-ssh -agent)
       [[ -n "$port" ]] && args+=(-P "$port")
       [[ -n "$user" ]] && args+=(-l "$user")
-      [[ -n "$pw" ]] && args+=(-pwfile <(printf '%s\n' "$pw"))
+      # <(...) in the exec line: bash 4+ closes one made in an assignment before exec.
+      [[ -n "$pw" ]] && exec plink "${args[@]}" -pwfile <(printf '%s\n' "$pw") "$host" "$@"
       exec plink "${args[@]}" "$host" "$@"
     fi
     # ssh tries keys first (agent, ~/.ssh), then the password.
     if [[ -n "$pw" ]]; then
-      # ssh asks bm itself for the password; exported env does not show in argv.
-      export SSH_ASKPASS="$HERE/bm" SSH_ASKPASS_REQUIRE=force BM_ASKPASS_PW="$pw"
+      # ssh asks bm itself for the password (SSH_ASKPASS). ssh passes its environment
+      # on to ProxyCommand, Match exec etc., so only the path of a 0600 file in a 0700
+      # folder goes there; the first password prompt reads and deletes the file.
+      local d; d="$(mktemp -d "${TMPDIR:-/tmp}/bm.XXXXXXXX")"
+      (umask 077; printf '%s\n' "$pw" >"$d/pw")
+      # bm becomes ssh below, so a detached job removes the file if ssh never asks.
+      (trap '' HUP INT; sleep 60; rm -rf "$d") </dev/null >/dev/null 2>&1 &
+      export SSH_ASKPASS="$HERE/bm" SSH_ASKPASS_REQUIRE=force BM_ASKPASS="$d/pw"
     fi
-    exec ssh ${port:+-p "$port"} ${user:+-l "$user"} "$host" "$@"
+    # ssh options right after the query (-t, -L 8080:localhost:80, -oName=value) stay
+    # options, before the -- in front of the host; the first other word starts the
+    # remote command. Parsed as ssh's getopt does: in a word like -NL the first letter
+    # that takes a value ends it, and at the end of the word the value is the next word.
+    local opts=(); local a i
+    while [[ $# -gt 0 && "$1" == -?* ]]; do
+      a="$1"; shift
+      [[ "$a" == -- ]] && break
+      opts+=("$a")
+      for (( i = 1; i < ${#a}; i++ )); do
+        [[ "bceilmopBDEFIJLOPQRSwW" == *"${a:i:1}"* ]] || continue
+        if (( i == ${#a} - 1 )) && [[ $# -gt 0 ]]; then opts+=("$1"); shift; fi
+        break
+      done
+    done
+    exec ssh ${port:+-p "$port"} ${user:+-l "$user"} "${opts[@]+"${opts[@]}"}" -- "$host" "$@"
   fi
 
   [[ -n "$pw" ]] || exec telnet "$host" ${port:+"$port"}
-  export BM_HOST="$host" BM_PORT="$port" BM_USER="$user" BM_PW="$pw"
+  # The password goes to expect on fd 3, not in the environment that telnet gets too.
+  export BM_HOST="$host" BM_PORT="$port" BM_USER="$user"
   exec expect -c '
-    set user $env(BM_USER); set pw $env(BM_PW)
-    unset env(BM_PW) env(BM_USER)
+    set user $env(BM_USER); unset env(BM_USER)
+    set f [open /dev/fd/3]; gets $f pw; close $f
     set timeout 20
     if {$env(BM_PORT) eq ""} { spawn telnet $env(BM_HOST) } else { spawn telnet $env(BM_HOST) $env(BM_PORT) }
     expect {
@@ -156,30 +241,38 @@ remote() {
       timeout {}
       eof { exit 1 }
     }
-    interact'
+    interact' 3< <(printf '%s\n' "$pw")
 }
 
 cmd="${1:-}"; [[ $# -gt 0 ]] && shift
 
-# SSH_ASKPASS mode: answer password prompts, ask the user for anything else (host key etc).
-if [[ -n "${BM_ASKPASS_PW:-}" ]]; then
-  case "$cmd" in
-    *assword*|*assphrase*) printf '%s\n' "$BM_ASKPASS_PW" ;;
-    *) printf '%s ' "$cmd" >/dev/tty; read -r a </dev/tty; echo "$a" ;;
-  esac
+# SSH_ASKPASS mode: answer the first password prompt from the file remote() made, then
+# delete it. Ask the user for anything else (host key, key passphrase, a second try).
+if [[ -n "${BM_ASKPASS:-}" ]]; then
+  if [[ "$cmd" == *assword* && -f "$BM_ASKPASS" ]]; then
+    IFS= read -r a <"$BM_ASKPASS" || true
+    rm -f "$BM_ASKPASS"; rmdir "${BM_ASKPASS%/*}" 2>/dev/null || true
+    printf '%s\n' "$a"
+  elif [[ "$cmd" == *assword* || "$cmd" == *assphrase* ]]; then
+    printf '%s' "$cmd" >/dev/tty; IFS= read -rs a </dev/tty; echo >/dev/tty; printf '%s\n' "$a"
+  else
+    printf '%s ' "$cmd" >/dev/tty; read -r a </dev/tty; echo "$a"
+  fi
   exit 0
 fi
 
 [[ "$cmd" == init || "$cmd" == keychain || "$cmd" == lock || "$cmd" == version || "$cmd" == -V || "$cmd" == --version || -z "$cmd" || "$cmd" == -h || "$cmd" == help ]] \
-  || { [[ -f "$DB" ]] || die "no database at $DB, run 'bm init'"
+  || { need_kxc
+       [[ -f "$DB" ]] || die "no database at $DB, run 'bm init'"
        # Unlock once here: resolve() runs in a subshell and cannot keep MP.
        master; }
 
 case "$cmd" in
   init)
+    need_kxc
     [[ -f "$DB" ]] && die "database already exists: $DB"
     mkdir -p "$(dirname "$DB")"
-    "$KXC" db-create -p "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB"
+    PATH="$KXC_PATH" "$KXC" db-create -p "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB"
     ;;
   add)
     url="${1:-}"; [[ -n "$url" ]] || die "add: URL required"; shift
@@ -238,7 +331,9 @@ case "$cmd" in
     e="$(resolve "$1")"
     u="$(kx show -a url "$e")"
     [[ -n "$u" ]] || die "no URL in $e"
-    if [[ "$cmd" == open ]]; then open "$u"; else echo "$u"; fi
+    if [[ "$cmd" != open ]]; then echo "$u"
+    elif [[ "$OS" == Darwin ]]; then open "$u"
+    else xdg-open "$u"; fi
     ;;
   show)
     secret=0; [[ "${1:-}" == -s ]] && { secret=1; shift; }
@@ -253,7 +348,7 @@ case "$cmd" in
     echo "Path: $e"
     # Without -s keepassxc-cli prints the password as PROTECTED.
     if (( secret )); then kx show --show-attachments -s "$e"; else kx show --show-attachments "$e"; fi
-    if (( secret )); then
+    if (( secret )) && clip_ok; then
       kx clip "$e" "$CLIP_TIMEOUT" >/dev/null 2>&1 &
       disown
       echo "password copied, clears in ${CLIP_TIMEOUT}s" >&2
@@ -263,6 +358,7 @@ case "$cmd" in
     [[ -n "${1:-}" ]] || die "$cmd: query required"
     e="$(resolve "$1")"
     attr=password; [[ "$cmd" == user ]] && attr=username
+    clip_ok || exit 1
     # clip blocks until it clears the clipboard, so run it in the background.
     kx clip -a "$attr" "$e" "$CLIP_TIMEOUT" >/dev/null 2>&1 &
     disown
@@ -294,33 +390,77 @@ case "$cmd" in
   keychain)
     case "${1:-}" in
       on)
-        [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
-        cat >&2 <<'EOF'
+        shift; ttl=0 lock=1
+        [[ "$OS" == Darwin || $# -eq 0 ]] || die "keychain on: --ttl and --no-lock need Touch ID (macOS)"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --ttl) [[ "${2:-}" =~ ^[0-9]{1,9}$ ]] || die "keychain on: --ttl takes seconds (0-999999999)"
+                   ttl=$((10#$2)); shift 2 ;;
+            --no-lock) lock=0; shift ;;
+            *) die "keychain on: unknown option $1" ;;
+          esac
+        done
+        need_kxc
+        if [[ "$OS" == Darwin ]]; then
+          [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
+          cat >&2 <<'EOF'
 WARNING: use this only on a trusted Mac.
 Only bm-touchid can read the stored master password, after Touch ID.
-But while one Touch ID approval is cached (BM_TOUCHID_TTL, default 1 hour),
+But while one Touch ID approval is cached (--ttl, default 0 = no cache),
 any program that runs as your user can run bm without Touch ID.
-On an untrusted Mac set BM_TOUCHID_TTL=0 or do not use Keychain.
+On an untrusted Mac do not use --ttl, or do not use Keychain.
 EOF
-        read -rp "Store the master password in Keychain? [y/N] " a
+          store=Keychain
+        else
+          command -v secret-tool >/dev/null || die "keychain on: install secret-tool (libsecret-tools)"
+          cat >&2 <<'EOF'
+WARNING: on Linux this is a convenience only, it protects nothing.
+The master password goes to the secret service (GNOME Keyring, KWallet) and
+bm reads it from there without asking. There is no Touch ID or other prompt:
+while your keyring is unlocked, any program that runs as your user can read it
+through D-Bus (secret-tool lookup). Do not use it on a shared or untrusted machine.
+EOF
+          store="the secret service"
+        fi
+        read -rp "Store the master password in $store? [y/N] " a
         [[ "$a" == y || "$a" == Y ]] || exit 0
-        read -rsp "Master password: " MP; echo >&2
+        IFS= read -rsp "Master password: " MP; echo >&2
         # Check the password before storing it.
         kx ls >/dev/null || die "wrong master password"
+        if [[ "$OS" != Darwin ]]; then
+          # secret-tool store reads the password from stdin, never from argv.
+          printf '%s' "$MP" | secret-tool store --label="bm master password" service "$KC_SERVICE" account "$DB" \
+            || die "cannot store it with secret-tool"
+          echo "master password stored in the secret service, bm no longer asks for it"
+          exit 0
+        fi
         # Drop an old item made by `security` (it trusts `security`), then let the
         # helper create a new one that trusts only the helper.
         security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1 || true
-        printf '%s\n' "$MP" | "$TOUCHID" set "$KC_SERVICE" "$DB" || die "cannot store in Keychain"
+        # The cache settings go into the item, so only the master password can change them.
+        printf '%s\n' "$MP" | "$TOUCHID" set "$KC_SERVICE" "$DB" "$ttl" "$lock" || die "cannot store in Keychain"
         echo "master password stored in Keychain, only bm-touchid can read it after Touch ID"
+        onlock=forgotten; (( lock )) || onlock=kept
+        if (( ttl )); then echo "one Touch ID stays valid ${ttl}s, $onlock when the screen locks"
+        else echo "Touch ID is asked for every command"; fi
         ;;
       off)
+        if [[ "$OS" != Darwin ]]; then
+          command -v secret-tool >/dev/null || die "keychain off: secret-tool not found"
+          secret-tool clear service "$KC_SERVICE" account "$DB" 2>/dev/null || die "no master password stored for $DB"
+          echo "removed from the secret service"
+          exit
+        fi
         [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
-        security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null && echo "removed from Keychain"
+        # security says "password has been deleted." on stderr; bm says it once.
+        security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1 || die "no master password stored for $DB"
+        echo "removed from Keychain"
         ;;
-      *) die "keychain: on or off" ;;
+      *) die "keychain: on [--ttl SECONDS] [--no-lock] or off" ;;
     esac
     ;;
   lock)
+    [[ "$OS" == Darwin ]] || { echo "nothing to forget: no Touch ID approval on Linux"; exit 0; }
     [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
     echo "Touch ID approval forgotten"
     ;;
