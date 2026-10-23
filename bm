@@ -6,6 +6,7 @@ set -euo pipefail
 CONFIG="${BM_CONFIG:-$HOME/.config/bm/config}"
 if [[ -f "$CONFIG" ]]; then set -a; source "$CONFIG"; set +a; fi
 
+BM_VERSION="1.0"
 DB="${BM_DB:-$HOME/.config/bm/bookmarks.kdbx}"
 CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
@@ -45,6 +46,7 @@ Usage: bm <command> [args]
   rm <query>                    move an entry to the recycle bin
   keychain on|off               store or forget the master password in Keychain (Touch ID)
   lock                          forget the Touch ID approval now
+  version                       print the version
 
 Settings (environment or ~/.config/bm/config):
   BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT, BM_KEY_TTL,
@@ -168,7 +170,7 @@ if [[ -n "${BM_ASKPASS_PW:-}" ]]; then
   exit 0
 fi
 
-[[ "$cmd" == init || "$cmd" == keychain || "$cmd" == lock || -z "$cmd" || "$cmd" == -h || "$cmd" == help ]] \
+[[ "$cmd" == init || "$cmd" == keychain || "$cmd" == lock || "$cmd" == version || "$cmd" == -V || "$cmd" == --version || -z "$cmd" || "$cmd" == -h || "$cmd" == help ]] \
   || { [[ -f "$DB" ]] || die "no database at $DB, run 'bm init'"
        # Unlock once here: resolve() runs in a subshell and cannot keep MP.
        master; }
@@ -319,6 +321,7 @@ EOF
     [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
     echo "Touch ID approval forgotten"
     ;;
+  -V|--version|version) echo "bm $BM_VERSION" ;;
   ""|-h|help) usage ;;
   *) usage >&2; exit 1 ;;
 esac
