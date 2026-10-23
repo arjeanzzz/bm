@@ -77,6 +77,17 @@ bm ssh -d admin@10.0.0.5    # user@ overrides the username of "default"
 When no entry matches the query, `bm ssh|plink|telnet <query>` works as `-d <query>`.
 If there is no `default` entry either, it connects without saved credentials.
 
+## Modes
+
+| Mode | Setup | Master password |
+|---|---|---|
+| Untrusted Mac (default) | nothing | typed every time |
+| Trusted Mac | `bm keychain on` | Keychain + Touch ID, cached for 1 hour |
+
+On an untrusted Mac do not use `bm keychain on`. `BM_TOUCHID_TTL=0` does not help
+there: any program that runs as your user can read the Keychain item with
+`security find-generic-password -w` without Touch ID.
+
 ## Touch ID
 
 `bm keychain on` stores the master password in the macOS login Keychain. After that,

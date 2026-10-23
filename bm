@@ -293,6 +293,14 @@ case "$cmd" in
     case "${1:-}" in
       on)
         [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
+        cat >&2 <<'EOF'
+WARNING: use this only on a trusted Mac.
+Any program that runs as your user can read the master password from Keychain
+with `security find-generic-password -w`, without Touch ID.
+Without Keychain, bm asks for the master password every time (bm keychain off).
+EOF
+        read -rp "Store the master password in Keychain? [y/N] " a
+        [[ "$a" == y || "$a" == Y ]] || exit 0
         read -rsp "Master password: " MP; echo >&2
         # Check the password before storing it.
         kx ls >/dev/null || die "wrong master password"
