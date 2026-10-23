@@ -1,25 +1,25 @@
 // bm-touchid: keeps the master password in Keychain and gives it out only after Touch ID
 // (or the login password as fallback).
 //
-//   bm-touchid set <service> <account>          store the password from stdin
-//   bm-touchid get <service> <account> [reason] print the password after Touch ID
-//   bm-touchid --forget                         drop the cached approval
+//   bm-touchid set <service> <account> <ttl> <lock 0|1>  store the password from stdin
+//   bm-touchid get <service> <account> [reason]          print the password after Touch ID
+//   bm-touchid --forget                                  drop the cached approval
 //
 // The Keychain item trusts only this binary, so `security find-generic-password -w`
 // and other programs get a macOS dialog that asks for the login password.
 //
-// A cached approval lives for BM_TOUCHID_TTL seconds (default 3600, 0 = no cache) and
-// ends early when the screen locks if BM_TOUCHID_LOCK is not 0. It is a state file
-// "pid expiry hmac" plus a running holder process with that pid. The HMAC is keyed with
-// the master password, so a program without it cannot forge an approval.
+// The item holds JSON {"password", "ttl", "lock"}, so only someone who knows the master
+// password can change the cache settings; the environment cannot. A cached approval
+// lives for ttl seconds (0 = no cache) and ends early when the screen locks if lock is
+// true. It is a state file "pid expiry hmac" plus a running holder process with that pid.
+// The HMAC is keyed with the master password, so a program without it cannot forge an
+// approval.
 import CryptoKit
 import Foundation
 import LocalAuthentication
 import Security
 
 let env = ProcessInfo.processInfo.environment
-let ttl = Double(env["BM_TOUCHID_TTL"] ?? "") ?? 3600
-let forgetOnLock = env["BM_TOUCHID_LOCK"] != "0"
 let stateFile = URL(fileURLWithPath: env["BM_TOUCHID_STATE"] ?? NSHomeDirectory() + "/.cache/bm/touchid.state")
 let args = CommandLine.arguments
 
@@ -43,16 +43,20 @@ func query(_ service: String, _ account: String) -> [String: Any] {
      kSecAttrAccount as String: account]
 }
 
-func readItem(_ service: String, _ account: String) -> String? {
+func readItem(_ service: String, _ account: String) -> (password: String, ttl: Int, lock: Bool)? {
     var q = query(service, account)
     q[kSecReturnData as String] = true
     q[kSecMatchLimit as String] = kSecMatchLimitOne
     var out: CFTypeRef?
     guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let data = out as? Data else { return nil }
-    return String(data: data, encoding: .utf8)
+    if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let p = j["password"] as? String {
+        return (p, j["ttl"] as? Int ?? 0, j["lock"] as? Bool ?? true)
+    }
+    // An item from bm 1.1 holds the bare password: no cache.
+    return String(data: data, encoding: .utf8).map { ($0, 0, true) }
 }
 
-func storeItem(_ service: String, _ account: String, _ password: String) {
+func storeItem(_ service: String, _ account: String, _ password: String, _ ttl: Int, _ lock: Bool) {
     SecItemDelete(query(service, account) as CFDictionary)
     // nil path = this binary. The ACL lists no other application.
     var me: SecTrustedApplication?
@@ -61,7 +65,8 @@ func storeItem(_ service: String, _ account: String, _ password: String) {
           SecAccessCreate("bm master password" as CFString, [me] as CFArray, &access) == errSecSuccess, let access
     else { fail("cannot create Keychain access rule", 5) }
     var item = query(service, account)
-    item[kSecValueData as String] = Data(password.utf8)
+    item[kSecValueData as String] = try! JSONSerialization.data(
+        withJSONObject: ["password": password, "ttl": ttl, "lock": lock] as [String: Any])
     item[kSecAttrAccess as String] = access
     item[kSecAttrLabel as String] = "bm"
     let status = SecItemAdd(item as CFDictionary, nil)
@@ -83,22 +88,23 @@ func readState() -> (pid: pid_t, expiry: Int, mac: String)? {
     return (pid, exp, f[2].trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
-func cacheValid(_ password: String) -> Bool {
+func cacheValid(_ password: String, _ ttl: Int) -> Bool {
     guard ttl > 0, let st = readState(), kill(st.pid, 0) == 0, exePath(st.pid) == me,
           Int(Date().timeIntervalSince1970) < st.expiry else { return false }
     return st.mac == mac(password, st.pid, st.expiry)
 }
 
-func startHolder(_ password: String) {
+func startHolder(_ password: String, _ ttl: Int, _ lock: Bool) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: me)
-    p.arguments = ["--hold", String(Int(ttl))]
+    // Anyone can start a holder with any arguments; without the HMAC it approves nothing.
+    p.arguments = ["--hold", String(ttl), lock ? "1" : "0"]
     // Detach from our stdio, so `$(bm ...)` does not wait for the holder.
     p.standardInput = FileHandle.nullDevice
     p.standardOutput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
     guard (try? p.run()) != nil else { return }
-    let expiry = Int(Date().timeIntervalSince1970 + ttl)
+    let expiry = Int(Date().timeIntervalSince1970) + ttl
     let dir = stateFile.deletingLastPathComponent()
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                              attributes: [.posixPermissions: 0o700])
@@ -107,7 +113,7 @@ func startHolder(_ password: String) {
                                    attributes: [.posixPermissions: 0o600])
 }
 
-func hold(_ seconds: Double) -> Never {
+func hold(_ seconds: Double, _ forgetOnLock: Bool) -> Never {
     signal(SIGHUP, SIG_IGN)
     signal(SIGTERM) { _ in exit(0) }
     func done() -> Never {
@@ -146,25 +152,28 @@ func touchID(_ reason: String) -> Bool {
 
 // MARK: Main
 
+let usage = "usage: bm-touchid set <service> <account> <ttl> <lock 0|1> | get <service> <account> [reason] | --forget"
+
 switch args.count > 1 ? args[1] : "" {
-case "--hold":
-    hold(args.count > 2 ? Double(args[2]) ?? ttl : ttl)
+case "--hold" where args.count >= 4:
+    hold(Double(args[2]) ?? 0, args[3] != "0")
 case "--forget":
     forget()
-case "set" where args.count >= 4:
+case "set" where args.count >= 6:
+    guard let ttl = Int(args[4]), ttl >= 0, args[5] == "0" || args[5] == "1" else { fail(usage, 64) }
     guard let password = readLine(strippingNewline: true), !password.isEmpty else { fail("no password on stdin", 1) }
-    storeItem(args[2], args[3], password)
+    storeItem(args[2], args[3], password, ttl, args[5] == "1")
     forget()
 case "get" where args.count >= 4:
-    guard let password = readItem(args[2], args[3]) else { fail("no Keychain item", 4) }
-    if !cacheValid(password) {
+    guard let item = readItem(args[2], args[3]) else { fail("no Keychain item", 4) }
+    if !cacheValid(item.password, item.ttl) {
         // Tests set this to check the cache without a Touch ID dialog. It can only deny.
         if env["BM_TOUCHID_NONINTERACTIVE"] == "1" { exit(3) }
         guard touchID(args.count > 4 ? args[4] : "unlock") else { exit(1) }
-        if ttl > 0 { startHolder(password) }
+        if item.ttl > 0 { startHolder(item.password, item.ttl, item.lock) }
     }
-    print(password)
+    print(item.password)
 default:
-    fail("usage: bm-touchid set|get <service> <account> [reason] | --forget", 64)
+    fail(usage, 64)
 }
 exit(0)

@@ -2,11 +2,26 @@
 # bm - terminal bookmark manager on top of keepassxc-cli and a KeePass .kdbx file.
 set -euo pipefail
 
-# Optional settings file with BM_* lines; exported so bm-touchid sees them too.
+# Optional settings file with NAME=value lines. It is read as data, never run as code:
+# only the names below, values taken literally. A value here wins over the environment.
 CONFIG="${BM_CONFIG:-$HOME/.config/bm/config}"
-if [[ -f "$CONFIG" ]]; then set -a; source "$CONFIG"; set +a; fi
+if [[ -f "$CONFIG" ]]; then
+  n=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1))
+    [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    if [[ ! "$line" =~ ^(BM_DB|BM_KEYFILE|BM_CLIP_TIMEOUT|BM_KEY_TTL)=(.*)$ ]]; then
+      echo "bm: $CONFIG:$n ignored, allowed: BM_DB BM_KEYFILE BM_CLIP_TIMEOUT BM_KEY_TTL" >&2
+      continue
+    fi
+    name="${BASH_REMATCH[1]}" v="${BASH_REMATCH[2]}"
+    case "$v" in \"*\"|\'*\') v="${v:1:${#v}-2}" ;; esac
+    [[ "$v" == "~/"* ]] && v="$HOME/${v:2}"
+    export "$name=$v"
+  done <"$CONFIG"
+fi
 
-BM_VERSION="1.1"
+BM_VERSION="1.2"
 DB="${BM_DB:-$HOME/.config/bm/bookmarks.kdbx}"
 CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
@@ -44,14 +59,16 @@ Usage: bm <command> [args]
   edit <query> [-t title] [-u user] [--url url] [-p]
                                 change an entry
   rm <query>                    move an entry to the recycle bin
-  keychain on|off               store or forget the master password in Keychain (Touch ID)
+  keychain on [--ttl SECONDS] [--no-lock]
+                                store the master password in Keychain (Touch ID);
+                                --ttl: seconds one Touch ID stays valid (default 0 =
+                                ask every time), --no-lock: keep it when the screen locks
+  keychain off                  forget the master password in Keychain
   lock                          forget the Touch ID approval now
   version                       print the version
 
-Settings (environment or ~/.config/bm/config):
-  BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT, BM_KEY_TTL,
-  BM_TOUCHID_TTL   seconds one Touch ID stays valid, 0 = ask every time (default 3600)
-  BM_TOUCHID_LOCK  0 = keep the approval when the screen locks (default 1)
+Settings (environment or NAME=value lines in ~/.config/bm/config):
+  BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT, BM_KEY_TTL
 EOF
 }
 
@@ -294,13 +311,22 @@ case "$cmd" in
   keychain)
     case "${1:-}" in
       on)
+        shift; ttl=0 lock=1
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --ttl) [[ "${2:-}" =~ ^[0-9]{1,9}$ ]] || die "keychain on: --ttl takes seconds (0-999999999)"
+                   ttl=$((10#$2)); shift 2 ;;
+            --no-lock) lock=0; shift ;;
+            *) die "keychain on: unknown option $1" ;;
+          esac
+        done
         [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
         cat >&2 <<'EOF'
 WARNING: use this only on a trusted Mac.
 Only bm-touchid can read the stored master password, after Touch ID.
-But while one Touch ID approval is cached (BM_TOUCHID_TTL, default 1 hour),
+But while one Touch ID approval is cached (--ttl, default 0 = no cache),
 any program that runs as your user can run bm without Touch ID.
-On an untrusted Mac set BM_TOUCHID_TTL=0 or do not use Keychain.
+On an untrusted Mac do not use --ttl, or do not use Keychain.
 EOF
         read -rp "Store the master password in Keychain? [y/N] " a
         [[ "$a" == y || "$a" == Y ]] || exit 0
@@ -310,14 +336,18 @@ EOF
         # Drop an old item made by `security` (it trusts `security`), then let the
         # helper create a new one that trusts only the helper.
         security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1 || true
-        printf '%s\n' "$MP" | "$TOUCHID" set "$KC_SERVICE" "$DB" || die "cannot store in Keychain"
+        # The cache settings go into the item, so only the master password can change them.
+        printf '%s\n' "$MP" | "$TOUCHID" set "$KC_SERVICE" "$DB" "$ttl" "$lock" || die "cannot store in Keychain"
         echo "master password stored in Keychain, only bm-touchid can read it after Touch ID"
+        onlock=forgotten; (( lock )) || onlock=kept
+        if (( ttl )); then echo "one Touch ID stays valid ${ttl}s, $onlock when the screen locks"
+        else echo "Touch ID is asked for every command"; fi
         ;;
       off)
         [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
         security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null && echo "removed from Keychain"
         ;;
-      *) die "keychain: on or off" ;;
+      *) die "keychain: on [--ttl SECONDS] [--no-lock] or off" ;;
     esac
     ;;
   lock)

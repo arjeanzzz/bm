@@ -3,7 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-export BM_DB="$tmp/t.kdbx" BM_CLIP_TIMEOUT=2
+# BM_CONFIG: never read the real config, it could point BM_DB at the real database.
+export BM_DB="$tmp/t.kdbx" BM_CLIP_TIMEOUT=2 BM_CONFIG="$tmp/config"
 mp=test-master
 
 printf '%s\n%s\n' "$mp" "$mp" | ./bm init >/dev/null
@@ -13,6 +14,23 @@ printf '%s\n' "$mp" | ./bm add https://news.ycombinator.com -t hn >/dev/null
 out="$(printf '%s\n' "$mp" | ./bm ls)"
 grep -q 'work/dev/example.com' <<<"$out" || { echo "FAIL ls: $out"; exit 1; }
 grep -q '^hn$' <<<"$out" || { echo "FAIL ls hn: $out"; exit 1; }
+
+# The config is data: code in it does not run, other names are ignored with a warning,
+# an allowed line wins over the environment (quotes stripped, ~/ expanded).
+cat >"$BM_CONFIG" <<EOF
+# comment
+
+trap 'touch $tmp/pwned' EXIT
+BM_CLIP_TIMEOUT=\$(touch $tmp/pwned)
+BM_TOUCHID_TTL=3600
+PATH=/nonexistent
+BM_DB="~/t.kdbx"
+EOF
+out="$(printf '%s\n' "$mp" | HOME="$tmp" BM_DB=/nonexistent ./bm ls 2>&1)"
+[[ ! -e "$tmp/pwned" ]] || { echo "FAIL config ran as code"; exit 1; }
+grep -q '^hn$' <<<"$out" || { echo "FAIL config BM_DB: $out"; exit 1; }
+[[ "$(grep -c ignored <<<"$out")" == 3 ]] || { echo "FAIL config warnings: $out"; exit 1; }
+rm "$BM_CONFIG"
 
 [[ "$(printf '%s\n' "$mp" | ./bm url hn)" == https://news.ycombinator.com ]] || { echo "FAIL url"; exit 1; }
 
@@ -104,18 +122,31 @@ grep -q 'plink -ssh -agent -l ops -pwfile /dev/fd/[0-9]* 10.0.0.7' <<<"$out" && 
 # helper fail instead of asking; a valid cache is made by hand with the known password.
 if [[ -x ./bm-touchid ]]; then
   export BM_TOUCHID_STATE="$tmp/touchid.state" BM_TOUCHID_NONINTERACTIVE=1
-  trap './bm-touchid --forget; security delete-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1; rm -rf "$tmp"' EXIT
+  # || true: under set -e a missing item would end the trap before rm.
+  trap './bm-touchid --forget; security delete-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
   printf 'y\n%s\n' "$mp" | ./bm keychain on >/dev/null 2>&1
   if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: worked without Touch ID"; exit 1; fi
+  if printf 'y\n%s\n' "$mp" | ./bm keychain on --ttl abc >/dev/null 2>&1; then echo "FAIL keychain: --ttl abc accepted"; exit 1; fi
+  security find-generic-password -s bm -a "$BM_DB" >/dev/null 2>&1 || { echo "FAIL keychain: no item"; exit 1; }
+
+  # A live holder (its pid in hp) and a state file signed with the known password.
+  hold() { hp="$(./bm-touchid --hold 60 1 </dev/null >/dev/null 2>&1 & echo $!)"; sleep 1; exp=$(( $(date +%s) + 60 )); }
+  valid_state() { echo "$hp $exp $(printf '%s' "$hp:$exp" | openssl dgst -sha256 -hmac "$mp" -r | cut -d' ' -f1)" > "$BM_TOUCHID_STATE"; }
 
   # A forged cache with a live holder must not work.
-  (BM_TOUCHID_TTL=60 ./bm-touchid --hold 60 </dev/null >/dev/null 2>&1 &); sleep 1
-  hp="$(pgrep -f 'bm-touchid --hold 60' | tail -1)"; exp=$(( $(date +%s) + 60 ))
+  hold
   echo "$hp $exp 00" > "$BM_TOUCHID_STATE"
   if ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: forged cache accepted"; exit 1; fi
 
-  m="$(printf '%s' "$hp:$exp" | openssl dgst -sha256 -hmac "$mp" -r | cut -d' ' -f1)"
-  echo "$hp $exp $m" > "$BM_TOUCHID_STATE"
+  # The item says ttl 0 (the default): a valid cache is refused, whatever env and config say.
+  valid_state
+  echo BM_TOUCHID_TTL=3600 >"$BM_CONFIG"
+  if BM_TOUCHID_TTL=3600 BM_TOUCHID_LOCK=0 ./bm ls </dev/null >/dev/null 2>&1; then echo "FAIL keychain: cache from BM_TOUCHID_TTL"; exit 1; fi
+  rm "$BM_CONFIG"
+
+  # --ttl 60 goes into the item, then a valid cache works.
+  printf 'y\n%s\n' "$mp" | ./bm keychain on --ttl 60 >/dev/null 2>&1
+  hold; valid_state
   ./bm ls </dev/null | grep -q '^default$' || { echo "FAIL keychain: valid cache rejected"; exit 1; }
 
   ./bm lock >/dev/null
@@ -125,6 +156,6 @@ if [[ -x ./bm-touchid ]]; then
   unset BM_TOUCHID_NONINTERACTIVE
 fi
 
-[[ "$(./bm --version)" == "bm 1.1" ]] || { echo "FAIL version"; exit 1; }
+[[ "$(./bm --version)" == "bm 1.2" ]] || { echo "FAIL version"; exit 1; }
 
 echo OK

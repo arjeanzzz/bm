@@ -7,9 +7,19 @@ around `keepassxc-cli`.
 ## Install
 
 1. Install KeePassXC: `brew install --cask keepassxc`.
-2. Build the Touch ID helper and link `bm` into `~/.local/bin`: `make install`.
-3. Make sure `~/.local/bin` is in `PATH`.
-4. Create the database: `bm init`.
+2. Build the Touch ID helper as your user: `make`.
+3. Copy `bm` and the helper into `/usr/local/bin`, owned by root: `sudo make install-system`.
+   Programs that run as your user cannot change these copies. For another place use
+   `sudo make install-system PREFIX=/opt/bm`. Its `bin` folder must be owned by root and
+   writable only by root, otherwise `make` refuses it (on Intel Macs Homebrew often owns
+   `/usr/local/bin`).
+4. Make sure no other `bm` comes earlier in `PATH`: `command -v bm` must print
+   `/usr/local/bin/bm`. A folder you can write to (such as `~/.local/bin`) earlier in
+   `PATH` could hide the root-owned copy.
+5. Create the database: `bm init`.
+
+`make install` instead links `bm` from this folder into `~/.local/bin`. That is handy
+while you work on `bm`, but then any program that runs as your user can change the script.
 
 ## Usage
 
@@ -82,8 +92,8 @@ If there is no `default` entry either, it connects without saved credentials.
 | Mode | Setup | Master password |
 |---|---|---|
 | Untrusted Mac (default) | nothing | typed every time |
-| Untrusted Mac, with Touch ID | `bm keychain on` + `BM_TOUCHID_TTL=0` | Keychain, Touch ID for every command |
-| Trusted Mac | `bm keychain on` | Keychain, one Touch ID per hour |
+| Untrusted Mac, with Touch ID | `bm keychain on` | Keychain, Touch ID for every command |
+| Trusted Mac | `bm keychain on --ttl 3600` | Keychain, one Touch ID per hour |
 
 ## Touch ID
 
@@ -95,18 +105,22 @@ The Keychain item trusts only the `bm-touchid` helper. Any other program, includ
 `security find-generic-password -w`, gets a macOS dialog that asks for your login
 password. If you did not start such a request, click **Deny**.
 
-One Touch ID stays valid for 1 hour, or until the screen locks. `bm lock` forgets it
-at once. Change this with `BM_TOUCHID_TTL` (seconds, `0` = ask every time) and
-`BM_TOUCHID_LOCK=0` (keep the approval when the screen locks). The cached approval
-is signed with the master password, so a program cannot forge it.
+By default `bm` asks for Touch ID for every command. `bm keychain on --ttl 3600` keeps
+one Touch ID valid for 1 hour, or until the screen locks; add `--no-lock` to keep it
+when the screen locks. `bm lock` forgets it at once. To change these, run
+`bm keychain on` again. They are stored in the Keychain item with the master password,
+not in the environment or the config file, so another program cannot raise them. The
+cached approval is signed with the master password, so a program cannot forge it.
 
 Limits:
 
 - While an approval is cached, any program that runs as your user can run `bm`
-  (or `bm-touchid get`) without Touch ID. On an untrusted Mac use `BM_TOUCHID_TTL=0`.
-- The access rule is bound to the helper's code signature. After you rebuild
-  `bm-touchid` (`make`), run `bm keychain on` again. Otherwise macOS asks for your
-  login password the next time the new helper reads the item.
+  (or `bm-touchid get`) without Touch ID. On an untrusted Mac do not use `--ttl`.
+- The access rule is bound to the helper's code signature. After you rebuild or
+  reinstall `bm-touchid` (`make`, `make install-system`), run `bm keychain on` again.
+  Otherwise macOS asks for your login password the next time the new helper reads the item.
+- With `make install`, `bm` runs from a folder you can write to, so any program that
+  runs as your user can change it. Use `sudo make install-system`.
 - Any program can delete the Keychain item. It cannot read it; `bm` then asks for the
   master password again.
 - The helper uses the legacy Keychain access API (`SecAccess`, deprecated since
@@ -119,26 +133,43 @@ Limits:
 Run `make install`, then `bm keychain on` again. This replaces the old Keychain item,
 which `security` could read, with a new one that only the helper can read.
 
+### Update from bm 1.1
+
+1. Run `make`, then `sudo make install-system` (see Install).
+2. Remove the old link: `rm ~/.local/bin/bm`. Check that `command -v bm` prints
+   `/usr/local/bin/bm`.
+3. Run `bm keychain on` again, because the access rule is bound to the helper's code
+   signature. Add `--ttl 3600` for the old one-hour cache. Until then `bm` asks for
+   Touch ID for every command: an item from 1.1 has no cache setting.
+4. Remove `BM_TOUCHID_TTL` and `BM_TOUCHID_LOCK` from `~/.config/bm/config`. `bm`
+   ignores them there (with a warning) and in the environment.
+5. The config file is no longer run as Bash code, see Settings.
+
 ## Settings
 
 Set these in the environment or in `~/.config/bm/config` (one `NAME=value` per line).
 The config file wins over the environment.
 
+The config is data, not code: `bm` does not run it as Bash. Blank lines and `#`
+comments are skipped. Values are taken literally (no `$VAR`, no `$(...)`), one pair of
+surrounding quotes is removed, and a leading `~/` means your home folder. Other names
+and malformed lines are ignored with a warning.
+
 ```
 # ~/.config/bm/config
-BM_TOUCHID_TTL=1800
-BM_TOUCHID_LOCK=1
+BM_DB=~/Documents/bookmarks.kdbx
+BM_CLIP_TIMEOUT=30
 ```
 
-| Variable          | Default                           |
-|-------------------|-----------------------------------|
-| `BM_DB`           | `~/.config/bm/bookmarks.kdbx`     |
-| `BM_KEYFILE`      | none                              |
-| `BM_CLIP_TIMEOUT` | `20` (seconds)                    |
-| `BM_KEY_TTL`      | `600` (seconds in ssh-agent)      |
-| `BM_TOUCHID_TTL`  | `3600` (seconds, `0` = no cache)  |
-| `BM_TOUCHID_LOCK` | `1` (`0` = survive screen lock)   |
-| `BM_CONFIG`       | `~/.config/bm/config`             |
+| Variable          | Default                                    |
+|-------------------|--------------------------------------------|
+| `BM_DB`           | `~/.config/bm/bookmarks.kdbx`              |
+| `BM_KEYFILE`      | none                                       |
+| `BM_CLIP_TIMEOUT` | `20` (seconds)                             |
+| `BM_KEY_TTL`      | `600` (seconds in ssh-agent)               |
+| `BM_CONFIG`       | `~/.config/bm/config` (environment only)   |
+
+The Touch ID cache is not a setting: use `bm keychain on --ttl` (see Touch ID).
 
 ## Test
 
