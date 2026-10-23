@@ -38,8 +38,12 @@ CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
 HERE="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 TOUCHID="$HERE/bm-touchid"
-if [[ "$OS" == Darwin ]]; then KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli
-else KXC="$(command -v keepassxc-cli || true)"; fi  # the distro package
+# macOS: the app in /Applications, or where MacPorts puts it. Linux: the distro package.
+if [[ "$OS" == Darwin ]]; then
+  KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli
+  port_kxc=/Applications/MacPorts/KeePassXC.app/Contents/MacOS/keepassxc-cli
+  if [[ ! -x "$KXC" && -x "$port_kxc" ]]; then KXC="$port_kxc"; fi
+else KXC="$(command -v keepassxc-cli || true)"; fi
 
 KEY_ARGS=()
 [[ -n "${BM_KEYFILE:-}" ]] && KEY_ARGS=(-k "$BM_KEYFILE")
