@@ -1,0 +1,183 @@
+#!/bin/bash
+# bm - terminal bookmark manager on top of keepassxc-cli and a KeePass .kdbx file.
+set -euo pipefail
+
+DB="${BM_DB:-$HOME/.config/bm/bookmarks.kdbx}"
+CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
+KC_SERVICE="bm"
+HERE="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+TOUCHID="$HERE/bm-touchid"
+KXC="$(command -v keepassxc-cli || echo /Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli)"
+
+KEY_ARGS=()
+[[ -n "${BM_KEYFILE:-}" ]] && KEY_ARGS=(-k "$BM_KEYFILE")
+
+die() { echo "bm: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage: bm <command> [args]
+
+  init                          create a new database
+  add <url> [-t title] [-g group] [-u user] [-p]
+                                add a bookmark (-p asks for a password)
+  ls [group]                    list entries
+  find <query>                  search entries
+  open <query>                  open the URL in the default browser
+  url <query>                   print the URL
+  pass <query>                  copy the password to the clipboard
+  user <query>                  copy the username to the clipboard
+  edit <query> [-t title] [-u user] [--url url] [-p]
+                                change an entry
+  rm <query>                    move an entry to the recycle bin
+  keychain on|off               store or forget the master password in Keychain (Touch ID)
+
+Environment: BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT
+EOF
+}
+
+# Master password: Keychain behind Touch ID if enabled, otherwise prompt.
+MP=""
+master() {
+  [[ -n "$MP" ]] && return
+  if security find-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1; then
+    [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
+    "$TOUCHID" "unlock bookmarks" || die "Touch ID failed"
+    MP="$(security find-generic-password -s "$KC_SERVICE" -a "$DB" -w)"
+  else
+    read -rsp "Master password: " MP; echo >&2
+  fi
+}
+
+# Run keepassxc-cli with the master password (and optional extra stdin lines) on stdin.
+kx() {
+  local cmd="$1"; shift
+  master
+  printf '%s\n' "$MP" "${EXTRA[@]+"${EXTRA[@]}"}" | "$KXC" "$cmd" -q "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB" "$@"
+}
+EXTRA=()
+
+# Resolve a query to exactly one entry path; ask the user when several match.
+resolve() {
+  local q="$1" matches n i
+  matches="$(kx search "$q" 2>/dev/null)" || die "nothing found: $q"
+  n="$(printf '%s\n' "$matches" | wc -l | tr -d ' ')"
+  if [[ "$n" == 1 ]]; then echo "$matches"; return; fi
+  printf '%s\n' "$matches" | nl -w2 -s') ' >&2
+  read -rp "Choose [1-$n]: " i
+  [[ "$i" =~ ^[0-9]+$ ]] && (( i >= 1 && i <= n )) || die "bad choice"
+  printf '%s\n' "$matches" | sed -n "${i}p"
+}
+
+ask_pass() {
+  local p1 p2
+  read -rsp "Entry password: " p1; echo >&2
+  read -rsp "Repeat: " p2; echo >&2
+  [[ "$p1" == "$p2" ]] || die "passwords do not match"
+  EXTRA=("$p1")
+}
+
+cmd="${1:-}"; [[ $# -gt 0 ]] && shift
+[[ "$cmd" == init || "$cmd" == keychain || -z "$cmd" || "$cmd" == -h || "$cmd" == help ]] \
+  || { [[ -f "$DB" ]] || die "no database at $DB, run 'bm init'"
+       # Unlock once here: resolve() runs in a subshell and cannot keep MP.
+       master; }
+
+case "$cmd" in
+  init)
+    [[ -f "$DB" ]] && die "database already exists: $DB"
+    mkdir -p "$(dirname "$DB")"
+    "$KXC" db-create -p "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB"
+    ;;
+  add)
+    url="${1:-}"; [[ -n "$url" ]] || die "add: URL required"; shift
+    title="" group="" user="" withpass=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -t) title="$2"; shift 2 ;;
+        -g) group="$2"; shift 2 ;;
+        -u) user="$2"; shift 2 ;;
+        -p) withpass=1; shift ;;
+        *) die "add: unknown option $1" ;;
+      esac
+    done
+    [[ -n "$title" ]] || { title="${url#*://}"; title="${title%%/*}"; }
+    path="$title"
+    if [[ -n "$group" ]]; then
+      # Create every level of the group; existing groups make mkdir fail, which is fine.
+      g=""
+      IFS=/ read -ra parts <<<"$group"
+      for part in "${parts[@]}"; do g="${g:+$g/}$part"; kx mkdir "$g" >/dev/null 2>&1 || true; done
+      path="$group/$title"
+    fi
+    args=(--url "$url")
+    [[ -n "$user" ]] && args+=(-u "$user")
+    (( withpass )) && { ask_pass; args+=(-p); }
+    kx add "${args[@]}" "$path" && echo "added: $path"
+    ;;
+  ls)
+    kx ls -R -f ${1:+"$1"} | grep -v '/$'
+    ;;
+  find)
+    [[ -n "${1:-}" ]] || die "find: query required"
+    kx search "$1"
+    ;;
+  open|url)
+    [[ -n "${1:-}" ]] || die "$cmd: query required"
+    e="$(resolve "$1")"
+    u="$(kx show -a url "$e")"
+    [[ -n "$u" ]] || die "no URL in $e"
+    if [[ "$cmd" == open ]]; then open "$u"; else echo "$u"; fi
+    ;;
+  pass|user)
+    [[ -n "${1:-}" ]] || die "$cmd: query required"
+    e="$(resolve "$1")"
+    attr=password; [[ "$cmd" == user ]] && attr=username
+    # clip blocks until it clears the clipboard, so run it in the background.
+    kx clip -a "$attr" "$e" "$CLIP_TIMEOUT" >/dev/null &
+    disown
+    echo "$attr of $e copied, clears in ${CLIP_TIMEOUT}s"
+    ;;
+  edit)
+    [[ -n "${1:-}" ]] || die "edit: query required"
+    e="$(resolve "$1")"; shift
+    args=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -t) args+=(-t "$2"); shift 2 ;;
+        -u) args+=(-u "$2"); shift 2 ;;
+        --url) args+=(--url "$2"); shift 2 ;;
+        -p) ask_pass; args+=(-p); shift ;;
+        *) die "edit: unknown option $1" ;;
+      esac
+    done
+    [[ ${#args[@]} -gt 0 ]] || die "edit: nothing to change"
+    kx edit "${args[@]}" "$e" && echo "changed: $e"
+    ;;
+  rm)
+    [[ -n "${1:-}" ]] || die "rm: query required"
+    e="$(resolve "$1")"
+    read -rp "Move $e to the recycle bin? [y/N] " a
+    [[ "$a" == y || "$a" == Y ]] || exit 0
+    kx rm "$e"
+    ;;
+  keychain)
+    case "${1:-}" in
+      on)
+        [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
+        read -rsp "Master password: " MP; echo >&2
+        # Check the password before storing it.
+        kx ls >/dev/null || die "wrong master password"
+        # -w as the last argument makes security prompt, so the password never goes into argv.
+        printf '%s\n%s\n' "$MP" "$MP" | security add-generic-password -U -s "$KC_SERVICE" -a "$DB" -w >/dev/null
+        echo "master password stored in Keychain, Touch ID required to use it"
+        ;;
+      off)
+        security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null && echo "removed from Keychain"
+        ;;
+      *) die "keychain: on or off" ;;
+    esac
+    ;;
+  ""|-h|help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac
