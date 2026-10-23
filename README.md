@@ -77,6 +77,10 @@ bm ssh -d 10.0.0.5:2200
 `bm` asks for Touch ID (or the login password) instead of the master password.
 `bm keychain off` removes it.
 
+One Touch ID stays valid for 1 hour, or until the screen locks. `bm lock` forgets it
+at once. Change this with `BM_TOUCHID_TTL` (seconds, `0` = ask every time) and
+`BM_TOUCHID_LOCK=0` (keep the approval when the screen locks).
+
 Limit: Touch ID is checked by the `bm-touchid` helper, not by a Keychain access rule.
 It protects against a person at your unlocked Mac. It does not protect against
 malware that runs as your user, because such a program can read the Keychain item
@@ -84,12 +88,24 @@ through `security` directly. If that matters, do not use `bm keychain on`.
 
 ## Settings
 
+Set these in the environment or in `~/.config/bm/config` (one `NAME=value` per line).
+The config file wins over the environment.
+
+```
+# ~/.config/bm/config
+BM_TOUCHID_TTL=1800
+BM_TOUCHID_LOCK=1
+```
+
 | Variable          | Default                           |
 |-------------------|-----------------------------------|
 | `BM_DB`           | `~/.config/bm/bookmarks.kdbx`     |
 | `BM_KEYFILE`      | none                              |
 | `BM_CLIP_TIMEOUT` | `20` (seconds)                    |
 | `BM_KEY_TTL`      | `600` (seconds in ssh-agent)      |
+| `BM_TOUCHID_TTL`  | `3600` (seconds, `0` = no cache)  |
+| `BM_TOUCHID_LOCK` | `1` (`0` = survive screen lock)   |
+| `BM_CONFIG`       | `~/.config/bm/config`             |
 
 ## Test
 

@@ -2,6 +2,10 @@
 # bm - terminal bookmark manager on top of keepassxc-cli and a KeePass .kdbx file.
 set -euo pipefail
 
+# Optional settings file with BM_* lines; exported so bm-touchid sees them too.
+CONFIG="${BM_CONFIG:-$HOME/.config/bm/config}"
+if [[ -f "$CONFIG" ]]; then set -a; source "$CONFIG"; set +a; fi
+
 DB="${BM_DB:-$HOME/.config/bm/bookmarks.kdbx}"
 CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
@@ -38,8 +42,12 @@ Usage: bm <command> [args]
                                 change an entry
   rm <query>                    move an entry to the recycle bin
   keychain on|off               store or forget the master password in Keychain (Touch ID)
+  lock                          forget the Touch ID approval now
 
-Environment: BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT, BM_KEY_TTL
+Settings (environment or ~/.config/bm/config):
+  BM_DB, BM_KEYFILE, BM_CLIP_TIMEOUT, BM_KEY_TTL,
+  BM_TOUCHID_TTL   seconds one Touch ID stays valid, 0 = ask every time (default 3600)
+  BM_TOUCHID_LOCK  0 = keep the approval when the screen locks (default 1)
 EOF
 }
 
@@ -151,7 +159,7 @@ if [[ -n "${BM_ASKPASS_PW:-}" ]]; then
   exit 0
 fi
 
-[[ "$cmd" == init || "$cmd" == keychain || -z "$cmd" || "$cmd" == -h || "$cmd" == help ]] \
+[[ "$cmd" == init || "$cmd" == keychain || "$cmd" == lock || -z "$cmd" || "$cmd" == -h || "$cmd" == help ]] \
   || { [[ -f "$DB" ]] || die "no database at $DB, run 'bm init'"
        # Unlock once here: resolve() runs in a subshell and cannot keep MP.
        master; }
@@ -257,10 +265,15 @@ case "$cmd" in
         echo "master password stored in Keychain, Touch ID required to use it"
         ;;
       off)
+        [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
         security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null && echo "removed from Keychain"
         ;;
       *) die "keychain: on or off" ;;
     esac
+    ;;
+  lock)
+    [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
+    echo "Touch ID approval forgotten"
     ;;
   ""|-h|help) usage ;;
   *) usage >&2; exit 1 ;;
