@@ -431,11 +431,14 @@ EOF
       off)
         if [[ "$OS" != Darwin ]]; then
           command -v secret-tool >/dev/null || die "keychain off: secret-tool not found"
-          secret-tool clear service "$KC_SERVICE" account "$DB" && echo "removed from the secret service"
+          secret-tool clear service "$KC_SERVICE" account "$DB" 2>/dev/null || die "no master password stored for $DB"
+          echo "removed from the secret service"
           exit
         fi
         [[ -x "$TOUCHID" ]] && "$TOUCHID" --forget
-        security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null && echo "removed from Keychain"
+        # security says "password has been deleted." on stderr; bm says it once.
+        security delete-generic-password -s "$KC_SERVICE" -a "$DB" >/dev/null 2>&1 || die "no master password stored for $DB"
+        echo "removed from Keychain"
         ;;
       *) die "keychain: on [--ttl SECONDS] [--no-lock] or off" ;;
     esac
