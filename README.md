@@ -17,19 +17,19 @@ Touch ID is optional: without it macOS asks for your login password.
 
 To install:
 
-- **KeePassXC** (required). `bm` runs
-  `/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli` (or
-  `/Applications/MacPorts/KeePassXC.app/...`), never one from `PATH`.
+- **KeePassXC** (required), the official build. `bm` runs
+  `/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli`, never one from `PATH`, and
+  only if it is signed by the KeePassXC team (Developer ID, team `G2S7P7J672`).
   - The official DMG from https://keepassxc.org/download/#macos (Apple Silicon or
     Intel). Drag the app to `/Applications`, then check it:
     `spctl -a -vv /Applications/KeePassXC.app` must say `Notarized Developer ID`.
-  - Or Homebrew: `brew install --cask keepassxc`.
-  - Then make it root-owned: `sudo chown -R root:wheel /Applications/KeePassXC.app`.
-    Otherwise a program that runs as you can replace `keepassxc-cli`, which gets your
-    master password. Updates (also `brew upgrade`) then no longer work as your user:
-    update by hand and run the `chown` again.
-  - Or MacPorts (`sudo port install KeePassXC`), which installs a root-owned app into
-    `/Applications/MacPorts`.
+  - Or Homebrew: `brew install --cask keepassxc` (the same signed build).
+  - MacPorts builds KeePassXC itself, without that signature, so `bm` refuses it.
+  - Optional: `sudo chown -R root:wheel /Applications/KeePassXC.app`. Then a program
+    that runs as you cannot change the app at all (`bm` would refuse a changed
+    `keepassxc-cli` anyway, but you may also use the app itself). Updates (also
+    `brew upgrade`) then no longer work as your user: update by hand and run the
+    `chown` again.
 - **Command Line Tools** (`xcode-select --install`), only to build the helper from
   source.
 - **plink** (PuTTY, `brew install putty`), only for `bm plink`, and **telnet**
@@ -246,9 +246,12 @@ caller's `BASH_ENV`, `SHELLOPTS` and exported functions are ignored) with a fixe
 `keepassxc-cli` gets the system folders only. A fake `keepassxc-cli`, `pbcopy` or `ssh`
 in a folder you can write to is not used. What is left:
 
-- On macOS `plink` and `telnet` come from `/opt/homebrew/bin`, and `KeePassXC.app`
-  from `/Applications`, unless you made it root-owned (see Requirements). Programs that
-  run as you can change those. `/Applications` itself is writable by admin users.
+- On macOS `plink` and `telnet` come from `/opt/homebrew/bin`, which programs that run
+  as you can change.
+- `bm` checks the signature of `keepassxc-cli` before each use. `/Applications` is
+  writable by admin users, so a program that swaps the app just between that check and
+  the start could still win; one that puts back an older signed KeePassXC passes the
+  check.
 - A program that runs as you can change your shell config (`~/.zshrc`, aliases,
   `PATH`), so the next `bm` you type runs something else. Root-owned copies and the
   alias do not help against that.
@@ -272,8 +275,7 @@ which `security` could read, with a new one that only the helper can read.
 
 ### Update from bm 1.1
 
-1. Run `make`, check the files and copy them as root (see Install). On a Mac also make
-   KeePassXC root-owned (see Requirements).
+1. Run `make`, check the files and copy them as root (see Install).
 2. Remove the old link: `rm ~/.local/bin/bm`. Check that `command -v bm` prints
    `/usr/local/bin/bm`.
 3. Run `bm keychain on` again, because the access rule is bound to the helper's code
@@ -282,7 +284,7 @@ which `security` could read, with a new one that only the helper can read.
 4. Remove `BM_TOUCHID_TTL` and `BM_TOUCHID_LOCK` from `~/.config/bm/config`. `bm`
    ignores them there (with a warning) and in the environment.
 5. The config file is no longer run as Bash code, see Settings.
-6. `bm` ignores your `PATH`: KeePassXC must be in `/Applications` (or MacPorts), see
+6. `bm` ignores your `PATH`: KeePassXC must be the signed build in `/Applications`, see
    Requirements. ssh options after the query are no longer passed to ssh, see SSH.
 
 ## Settings

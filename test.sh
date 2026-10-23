@@ -71,6 +71,15 @@ for t in keepassxc-cli pbcopy xclip wl-copy uname; do
   printf '#!/bin/sh\ntouch "%s/hijacked"\n' "$tmp" >"$evil/$t"; chmod +x "$evil/$t"
 done
 printf 'touch "%s/hijacked"\n' "$tmp" >"$evil/env.sh"
+# macOS: a keepassxc-cli without the KeePassXC team signature is refused (a copy of bm
+# that points at the fake one).
+if [[ "$os" == Darwin ]]; then
+  sed "s|then KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli\$|then KXC=$evil/keepassxc-cli|" bm >"$tmp/bm-kxc"
+  chmod +x "$tmp/bm-kxc"
+  grep -q "KXC=$evil/keepassxc-cli" "$tmp/bm-kxc" || { echo "FAIL test copy: no KXC line in bm"; exit 1; }
+  out="$(printf '%s\n' "$mp" | "$tmp/bm-kxc" ls 2>&1)" && { echo "FAIL unsigned keepassxc-cli used: $out"; exit 1; }
+  grep -q 'not signed' <<<"$out" || { echo "FAIL unsigned keepassxc-cli: $out"; exit 1; }
+fi
 printf '%s\n' "$mp" | PATH="$evil:$PATH" ./bm pass example >/dev/null 2>&1 || (( noclip )) \
   || { echo "FAIL pass with fake tools in PATH"; exit 1; }
 printf '%s\n' "$mp" | PATH="$evil:$PATH" BASH_ENV="$evil/env.sh" ./bm ls >/dev/null

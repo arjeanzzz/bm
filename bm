@@ -38,18 +38,23 @@ CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
 HERE="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 TOUCHID="$HERE/bm-touchid"
-# macOS: the app in /Applications, or where MacPorts puts it. Linux: the distro package.
-if [[ "$OS" == Darwin ]]; then
-  KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli
-  port_kxc=/Applications/MacPorts/KeePassXC.app/Contents/MacOS/keepassxc-cli
-  if [[ ! -x "$KXC" && -x "$port_kxc" ]]; then KXC="$port_kxc"; fi
-else KXC="$(command -v keepassxc-cli || true)"; fi
+if [[ "$OS" == Darwin ]]; then KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli
+else KXC="$(command -v keepassxc-cli || true)"; fi  # the distro package
+# macOS: keepassxc-cli must carry the Developer ID signature of the KeePassXC team. It
+# runs with hardened runtime and library validation, so it also loads only libraries
+# signed by that team or Apple: a replaced binary or framework is refused.
+KXC_TEAM=G2S7P7J672
 
 KEY_ARGS=()
 [[ -n "${BM_KEYFILE:-}" ]] && KEY_ARGS=(-k "$BM_KEYFILE")
 
 die() { echo "bm: $*" >&2; exit 1; }
-need_kxc() { [[ -x "$KXC" ]] || die "keepassxc-cli not found${KXC:+ at $KXC}, install KeePassXC (see README)"; }
+need_kxc() {
+  [[ -x "$KXC" ]] || die "keepassxc-cli not found${KXC:+ at $KXC}, install KeePassXC (see README)"
+  [[ "$OS" == Darwin ]] || return 0
+  codesign --verify -R="anchor apple generic and certificate leaf[subject.OU] = \"$KXC_TEAM\"" "$KXC" 2>/dev/null \
+    || die "$KXC is not signed by the KeePassXC team ($KXC_TEAM), not using it"
+}
 
 # Linux: secret-tool talks to the secret service over the D-Bus session bus. Without a
 # bus it could try to start one, so bm does not call it then.
