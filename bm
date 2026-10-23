@@ -1,6 +1,16 @@
-#!/bin/bash
+#!/bin/bash -p
 # bm - terminal bookmark manager on top of keepassxc-cli and a KeePass .kdbx file.
+# bash -p ignores BASH_ENV, SHELLOPTS and functions exported by the caller.
 set -euo pipefail
+# Fixed PATH, system folders first: a program that runs as you cannot slip in a fake
+# keepassxc-cli, pbcopy, ssh etc. through a folder you can write to early in your PATH.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+# keepassxc-cli runs clipboard tools by name (xclip before pbcopy, also on macOS):
+# system folders only.
+KXC_PATH="$PATH"
+# plink and telnet come from Homebrew; /opt/homebrew/bin is writable by you.
+PATH="$PATH:/usr/local/bin:/opt/homebrew/bin"
+export PATH
 
 # Optional settings file with NAME=value lines. It is read as data, never run as code:
 # only the names below, values taken literally. A value here wins over the environment.
@@ -27,12 +37,13 @@ CLIP_TIMEOUT="${BM_CLIP_TIMEOUT:-20}"
 KC_SERVICE="bm"
 HERE="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 TOUCHID="$HERE/bm-touchid"
-KXC="$(command -v keepassxc-cli || echo /Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli)"
+KXC=/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli
 
 KEY_ARGS=()
 [[ -n "${BM_KEYFILE:-}" ]] && KEY_ARGS=(-k "$BM_KEYFILE")
 
 die() { echo "bm: $*" >&2; exit 1; }
+need_kxc() { [[ -x "$KXC" ]] || die "keepassxc-cli not found at $KXC, install KeePassXC (see README)"; }
 
 usage() {
   cat <<'EOF'
@@ -89,7 +100,7 @@ master() {
 kx() {
   local cmd="$1"; shift
   master
-  printf '%s\n' "$MP" "${EXTRA[@]+"${EXTRA[@]}"}" | "$KXC" "$cmd" -q "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB" "$@"
+  printf '%s\n' "$MP" "${EXTRA[@]+"${EXTRA[@]}"}" | PATH="$KXC_PATH" "$KXC" "$cmd" -q "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB" "$@"
 }
 EXTRA=()
 
@@ -188,15 +199,17 @@ if [[ -n "${BM_ASKPASS_PW:-}" ]]; then
 fi
 
 [[ "$cmd" == init || "$cmd" == keychain || "$cmd" == lock || "$cmd" == version || "$cmd" == -V || "$cmd" == --version || -z "$cmd" || "$cmd" == -h || "$cmd" == help ]] \
-  || { [[ -f "$DB" ]] || die "no database at $DB, run 'bm init'"
+  || { need_kxc
+       [[ -f "$DB" ]] || die "no database at $DB, run 'bm init'"
        # Unlock once here: resolve() runs in a subshell and cannot keep MP.
        master; }
 
 case "$cmd" in
   init)
+    need_kxc
     [[ -f "$DB" ]] && die "database already exists: $DB"
     mkdir -p "$(dirname "$DB")"
-    "$KXC" db-create -p "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB"
+    PATH="$KXC_PATH" "$KXC" db-create -p "${KEY_ARGS[@]+"${KEY_ARGS[@]}"}" "$DB"
     ;;
   add)
     url="${1:-}"; [[ -n "$url" ]] || die "add: URL required"; shift
@@ -321,6 +334,7 @@ case "$cmd" in
           esac
         done
         [[ -x "$TOUCHID" ]] || die "bm-touchid not built, run 'make' in $HERE"
+        need_kxc
         cat >&2 <<'EOF'
 WARNING: use this only on a trusted Mac.
 Only bm-touchid can read the stored master password, after Touch ID.

@@ -40,6 +40,21 @@ sleep 1
 sleep 3
 [[ "$(pbpaste)" != s3cret ]] || { echo "FAIL clipboard not cleared"; exit 1; }
 
+# The caller's PATH and shell settings do not reach bm: fake tools early in PATH,
+# BASH_ENV and an exported function must not run, SHELLOPTS=xtrace must not leak.
+evil="$tmp/evil"; mkdir "$evil"
+for t in keepassxc-cli pbcopy xclip wl-copy uname; do
+  printf '#!/bin/sh\ntouch "%s/hijacked"\n' "$tmp" >"$evil/$t"; chmod +x "$evil/$t"
+done
+printf 'touch "%s/hijacked"\n' "$tmp" >"$evil/env.sh"
+printf '%s\n' "$mp" | PATH="$evil:$PATH" ./bm pass example >/dev/null
+printf '%s\n' "$mp" | PATH="$evil:$PATH" BASH_ENV="$evil/env.sh" ./bm ls >/dev/null
+( export tmp; read() { touch "$tmp/hijacked"; builtin read "$@"; }; export -f read; printf '%s\n' "$mp" | ./bm ls >/dev/null )
+out="$(printf '%s\n' "$mp" | env SHELLOPTS=xtrace ./bm ls 2>&1)"
+sleep 3
+[[ ! -e "$tmp/hijacked" ]] || { echo "FAIL caller PATH, BASH_ENV or exported function used"; exit 1; }
+grep -q "$mp" <<<"$out" && { echo "FAIL SHELLOPTS=xtrace shows the master password"; exit 1; }
+
 printf '%s\n' "$mp" | ./bm edit hn --url https://lobste.rs >/dev/null
 [[ "$(printf '%s\n' "$mp" | ./bm url hn)" == https://lobste.rs ]] || { echo "FAIL edit"; exit 1; }
 
@@ -68,6 +83,12 @@ cat >"$fake/plink" <<'EOF2'
 echo "plink $*"; while [[ $# -gt 0 ]]; do [[ "$1" == -pwfile ]] && echo "pw: $(cat "$2")"; shift; done
 EOF2
 chmod +x "$fake"/*
+# bm has a fixed PATH: the fake tools only work in a copy of bm whose PATH starts with
+# $fake. The copy finds the helper next to it.
+sed "s|^export PATH\$|PATH=$fake:\$PATH; export PATH|" bm >"$tmp/bm"; chmod +x "$tmp/bm"
+grep -q "^PATH=$fake:" "$tmp/bm" || { echo "FAIL test copy: no PATH line in bm"; exit 1; }
+ln -s "$PWD/bm-touchid" "$tmp/bm-touchid"
+tbm="$tmp/bm"
 ssh-keygen -q -t ed25519 -N '' -f "$tmp/k"
 
 printf '%s\n%s\n%s\n' "$mp" pw1 pw1 | ./bm add ssh://root@srv1.lan:2222 -p >/dev/null
@@ -86,36 +107,36 @@ grep -q 'Password: pw1' <<<"$out" || { echo "FAIL show -s: $out"; exit 1; }
 sleep 1
 [[ "$(pbpaste)" == pw1 ]] || { echo "FAIL show -s clipboard"; exit 1; }
 
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv1 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" ssh srv1 2>&1)"
 grep -q 'args: -p 2222 -l root srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL ssh pw: $out"; exit 1; }
 
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv2 uptime 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" ssh srv2 uptime 2>&1)"
 grep -q 'agent got key' <<<"$out" && grep -q 'args: -l deploy srv2.lan uptime' <<<"$out" || { echo "FAIL ssh key: $out"; exit 1; }
 grep -q 'pw:' <<<"$out" && { echo "FAIL ssh key entry has no password: $out"; exit 1; }
 
 # Key and password in one entry: both go to ssh, ssh tries the key first.
 printf '%s\n%s\n%s\n' "$mp" kpw kpw | ./bm add ssh://srv3.lan -u web -p -k "$tmp/k" >/dev/null
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv3 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" ssh srv3 2>&1)"
 grep -q 'agent got key' <<<"$out" && grep -q 'pw: kpw' <<<"$out" || { echo "FAIL ssh key+pw: $out"; exit 1; }
 
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh 10.9.9.9 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" ssh 10.9.9.9 2>&1)"
 grep -q 'without saved credentials' <<<"$out" && grep -q 'args: 10.9.9.9$' <<<"$out" || { echo "FAIL fallback no default: $out"; exit 1; }
-if printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh -d any.lan >/dev/null 2>&1; then echo "FAIL -d without default"; exit 1; fi
+if printf '%s\n' "$mp" | "$tbm" ssh -d any.lan >/dev/null 2>&1; then echo "FAIL -d without default"; exit 1; fi
 printf '%s\n%s\n%s\n' "$mp" dpw dpw | ./bm add ssh://default -t default -u ops -p >/dev/null
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh -d 10.0.0.5:2200 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" ssh -d 10.0.0.5:2200 2>&1)"
 grep -q 'args: -p 2200 -l ops 10.0.0.5' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL ssh -d: $out"; exit 1; }
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh -d root@1.2.3.4 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" ssh -d root@1.2.3.4 2>&1)"
 grep -q 'args: -l root 1.2.3.4' <<<"$out" || { echo "FAIL ssh -d user@: $out"; exit 1; }
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh admin@10.0.0.9 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" ssh admin@10.0.0.9 2>&1)"
 grep -q "using 'default'" <<<"$out" && grep -q 'args: -l admin 10.0.0.9' <<<"$out" && grep -q 'pw: dpw' <<<"$out" \
   || { echo "FAIL fallback to default: $out"; exit 1; }
 
-out="$({ printf '%s\n' "$mp"; sleep 2; } | PATH="$fake:$PATH" ./bm telnet sw1 2>&1)"
+out="$({ printf '%s\n' "$mp"; sleep 2; } | "$tbm" telnet sw1 2>&1)"
 grep -q 'telnet sw1.lan 23' <<<"$out" && grep -q 'got admin/pw3' <<<"$out" || { echo "FAIL telnet: $out"; exit 1; }
 
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm plink srv1 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" plink srv1 2>&1)"
 grep -q 'plink -ssh -agent -P 2222 -l root -pwfile /dev/fd/[0-9]* srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL plink: $out"; exit 1; }
-out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm plink -d 10.0.0.7 2>&1)"
+out="$(printf '%s\n' "$mp" | "$tbm" plink -d 10.0.0.7 2>&1)"
 grep -q 'plink -ssh -agent -l ops -pwfile /dev/fd/[0-9]* 10.0.0.7' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL plink -d: $out"; exit 1; }
 
 # Keychain + Touch ID cache, without a Touch ID dialog: NONINTERACTIVE makes the

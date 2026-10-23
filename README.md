@@ -6,7 +6,8 @@ around `keepassxc-cli`.
 
 ## Install
 
-1. Install KeePassXC: `brew install --cask keepassxc`.
+1. Install KeePassXC into `/Applications`: `brew install --cask keepassxc`. `bm` runs
+   `/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli`, never one from `PATH`.
 2. Build the Touch ID helper as your user: `make`.
 3. Copy `bm` and the helper into `/usr/local/bin`, owned by root: `sudo make install-system`.
    Programs that run as your user cannot change these copies. For another place use
@@ -20,6 +21,13 @@ around `keepassxc-cli`.
 
 `make install` instead links `bm` from this folder into `~/.local/bin`. That is handy
 while you work on `bm`, but then any program that runs as your user can change the script.
+
+`bm` ignores your `PATH`: it runs its tools from `/usr/bin:/bin:/usr/sbin:/sbin`, then
+`/usr/local/bin` and `/opt/homebrew/bin` (for `plink` and `telnet`), and keepassxc-cli
+from the system folders only. A fake `keepassxc-cli` or `pbcopy` in a folder you can
+write to is not used. It runs as `bash -p`, so `BASH_ENV`, `SHELLOPTS` and exported
+functions from the caller do not reach it. `/opt/homebrew/bin` is writable by you, so
+a program that runs as you can still replace `plink` and `telnet`.
 
 ## Usage
 
