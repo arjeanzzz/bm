@@ -30,6 +30,7 @@ Usage: bm <command> [args]
   find <query>                  search entries
   open <query>                  open the URL in the default browser
   url <query>                   print the URL
+  show <query>                  show the entry fields and attachments (password hidden)
   pass <query>                  copy the password to the clipboard
   user <query>                  copy the username to the clipboard
   ssh <query> [ssh args]        connect with the entry's key or password
@@ -191,6 +192,8 @@ case "$cmd" in
       esac
     done
     [[ -n "$title" ]] || { title="${url#*://}"; title="${title%%/*}"; title="${title#*@}"; }
+    # Keep user@ from the URL in the username field, so show and edit see it.
+    if [[ -z "$user" ]]; then t="${url#*://}"; t="${t%%/*}"; [[ "$t" == *@* ]] && user="${t%%@*}"; fi
     path="$title"
     if [[ -n "$group" ]]; then
       # Create every level of the group; existing groups make mkdir fail, which is fine.
@@ -233,6 +236,13 @@ case "$cmd" in
     u="$(kx show -a url "$e")"
     [[ -n "$u" ]] || die "no URL in $e"
     if [[ "$cmd" == open ]]; then open "$u"; else echo "$u"; fi
+    ;;
+  show)
+    [[ -n "${1:-}" ]] || die "show: query required"
+    e="$(resolve "$1")"
+    echo "Path: $e"
+    # Without -s keepassxc-cli prints the password as PROTECTED.
+    kx show --show-attachments "$e"
     ;;
   pass|user)
     [[ -n "${1:-}" ]] || die "$cmd: query required"

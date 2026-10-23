@@ -56,6 +56,11 @@ printf '%s\n%s\n%s\n' "$mp" pw1 pw1 | ./bm add ssh://root@srv1.lan:2222 -p >/dev
 printf '%s\n' "$mp" | ./bm add ssh://deploy@srv2.lan -k "$tmp/k" >/dev/null
 printf '%s\n%s\n%s\n' "$mp" pw3 pw3 | ./bm add telnet://sw1.lan:23 -u admin -p >/dev/null
 
+out="$(printf '%s\n' "$mp" | ./bm show srv2)"
+grep -q 'UserName: deploy' <<<"$out" && grep -q 'ssh-key' <<<"$out" || { echo "FAIL show: $out"; exit 1; }
+out="$(printf '%s\n' "$mp" | ./bm show srv1)"
+grep -q 'Password: PROTECTED' <<<"$out" && ! grep -q 'pw1' <<<"$out" || { echo "FAIL show hides password: $out"; exit 1; }
+
 out="$(printf '%s\n' "$mp" | PATH="$fake:$PATH" ./bm ssh srv1 2>&1)"
 grep -q 'args: -p 2222 -l root srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL ssh pw: $out"; exit 1; }
 
