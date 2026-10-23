@@ -138,7 +138,7 @@ bm add ssh://deploy@srv2.lan -k ~/.ssh/id_srv2  # private key as attachment "ssh
 bm add ssh://web@srv3.lan -p -k ~/.ssh/id_web   # key, then password as fallback
 bm add telnet://sw1.lan:23 -u admin -p
 
-bm ssh srv1                 # more arguments are the remote command: bm ssh srv2 uptime
+bm ssh srv1                 # then ssh options and a command: bm ssh srv2 -t top
 bm telnet sw1
 ```
 
@@ -151,8 +151,10 @@ bm telnet sw1
   file only you can read, which the first password prompt deletes (after 60 s at the
   latest). Other prompts, such as host key confirmation, a key passphrase or a second
   password try, go to you.
-- `bm` puts `--` before the host, so more arguments are the remote command, not ssh
-  options; put ssh options into `~/.ssh/config`. A host or port that starts with `-`
+- ssh options right after the query stay options (`bm ssh srv1 -L 8080:localhost:80`,
+  `-t`, `-o ServerAliveInterval=30`); the first other word starts the remote command,
+  and a `--` ends the options. `bm` puts `--` before the host, so the host from an
+  entry is never read as an option. A host or port that starts with `-`
   is refused.
 - `bm telnet` uses `expect`: it sends the username at the `login:` prompt and the
   password at the `Password:` prompt, then gives you the session. The password goes to
@@ -285,7 +287,7 @@ which `security` could read, with a new one that only the helper can read.
    ignores them there (with a warning) and in the environment.
 5. The config file is no longer run as Bash code, see Settings.
 6. `bm` ignores your `PATH`: KeePassXC must be the signed build in `/Applications`, see
-   Requirements. ssh options after the query are no longer passed to ssh, see SSH.
+   Requirements.
 
 ## Settings
 

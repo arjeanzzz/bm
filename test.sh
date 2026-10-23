@@ -153,6 +153,13 @@ grep -q 'pw file left' <<<"$out" && { echo "FAIL ssh: password file left"; exit 
 out="$(printf '%s\n' "$mp" | "$tbm" ssh srv2 uptime 2>&1)"
 grep -q 'agent got key' <<<"$out" && grep -q 'args: -l deploy -- srv2.lan uptime' <<<"$out" || { echo "FAIL ssh key: $out"; exit 1; }
 grep -q 'pw:' <<<"$out" && { echo "FAIL ssh key entry has no password: $out"; exit 1; }
+# ssh options after the query go before the --, also -NL with its value in the next word
+# and -o with the value attached; the first other word, or a --, starts the command.
+out="$(printf '%s\n' "$mp" | "$tbm" ssh srv2 -t -NL 8080:localhost:80 -oServerAliveInterval=30 -o Compression=yes top -d 2>&1)"
+grep -q 'args: -l deploy -t -NL 8080:localhost:80 -oServerAliveInterval=30 -o Compression=yes -- srv2.lan top -d$' <<<"$out" \
+  || { echo "FAIL ssh options: $out"; exit 1; }
+out="$(printf '%s\n' "$mp" | "$tbm" ssh srv2 -v -- -x 2>&1)"
+grep -q 'args: -l deploy -v -- srv2.lan -x$' <<<"$out" || { echo "FAIL ssh options --: $out"; exit 1; }
 
 # Key and password in one entry: both go to ssh, ssh tries the key first.
 printf '%s\n%s\n%s\n' "$mp" kpw kpw | ./bm add ssh://srv3.lan -u web -p -k "$tmp/k" >/dev/null

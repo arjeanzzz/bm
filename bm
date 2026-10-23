@@ -86,7 +86,8 @@ Usage: bm <command> [args]
                                 -s asks, then shows the password and copies it
   pass <query>                  copy the password to the clipboard
   user <query>                  copy the username to the clipboard
-  ssh <query> [command]         connect with the entry's key or password
+  ssh <query> [ssh options] [command]
+                                connect with the entry's key or password
   ssh -d <[user@]host[:port]>   connect to any server with the "default" entry
   telnet <query>                connect and log in with the entry's password
   telnet -d <host[:port]>       same, with the "default" entry
@@ -208,7 +209,22 @@ remote() {
       (trap '' HUP INT; sleep 60; rm -rf "$d") </dev/null >/dev/null 2>&1 &
       export SSH_ASKPASS="$HERE/bm" SSH_ASKPASS_REQUIRE=force BM_ASKPASS="$d/pw"
     fi
-    exec ssh ${port:+-p "$port"} ${user:+-l "$user"} -- "$host" "$@"
+    # ssh options right after the query (-t, -L 8080:localhost:80, -oName=value) stay
+    # options, before the -- in front of the host; the first other word starts the
+    # remote command. Parsed as ssh's getopt does: in a word like -NL the first letter
+    # that takes a value ends it, and at the end of the word the value is the next word.
+    local opts=(); local a i
+    while [[ $# -gt 0 && "$1" == -?* ]]; do
+      a="$1"; shift
+      [[ "$a" == -- ]] && break
+      opts+=("$a")
+      for (( i = 1; i < ${#a}; i++ )); do
+        [[ "bceilmopBDEFIJLOPQRSwW" == *"${a:i:1}"* ]] || continue
+        if (( i == ${#a} - 1 )) && [[ $# -gt 0 ]]; then opts+=("$1"); shift; fi
+        break
+      done
+    done
+    exec ssh ${port:+-p "$port"} ${user:+-l "$user"} "${opts[@]+"${opts[@]}"}" -- "$host" "$@"
   fi
 
   [[ -n "$pw" ]] || exec telnet "$host" ${port:+"$port"}
