@@ -173,6 +173,31 @@ modern OpenSSH refuses because of legacy key exchange, ciphers or host keys.
   argv and not on disk.
 - When the device offers a weak cipher, plink asks you to confirm it. Answer `y`.
 
+### SMB shares (macOS)
+
+`bm smb <query> <mountpoint> [share]` mounts a share with `mount_smbfs`, with the
+username and password of the entry:
+
+```
+bm add smb://dc2.corp.lan/Docs -t dc2 -u 'CORP\alice' -p
+bm smb dc2 ~/Mounts/DC2                    # //CORP;alice@dc2.corp.lan/Docs
+bm smb dc2 ~/Mounts/IT 'Общие/IT'          # another share on the same server
+bm smb dc2 ~/Mounts/Pub //fs1.corp.lan/Pub # another server, same account
+```
+
+- The URL is `smb://[user@]host[:port]/share`. The optional third argument replaces
+  the share, or with `//host/share` also the server, so one entry with a domain
+  account serves many shares.
+- A username `DOMAIN\user` (or `DOMAIN;user`) becomes `DOMAIN;user` for `mount_smbfs`.
+  Spaces and other characters in the username and share are URL-encoded.
+- The mount point is created if missing. If something is already mounted there, `bm`
+  says `already mounted` and exits 0, so a script can run it again.
+- The password goes to `expect` through a pipe and from there to the
+  `mount_smbfs` password prompt. It is not in the URL, so it does not show in `ps`, and
+  not in the environment or on disk.
+- In a script that mounts several shares, `bm keychain on --ttl 600` makes one Touch ID
+  do for all of them.
+
 ### Default entry
 
 `bm ssh -d`, `bm plink -d` and `bm telnet -d` connect to a server

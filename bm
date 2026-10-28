@@ -93,6 +93,8 @@ Usage: bm <command> [args]
   telnet -d <host[:port]>       same, with the "default" entry
   plink <query> [command]       PuTTY plink over ssh, for old devices with legacy ciphers
   plink -d <[user@]host[:port]> same, with the "default" entry
+  smb <query> <mountpoint> [share | //host/share]
+                                mount an SMB share with the entry's password (macOS)
   edit <query> [-t title] [-u user] [--url url] [-p]
                                 change an entry
   rm <query>                    move an entry to the recycle bin
@@ -244,6 +246,66 @@ remote() {
     interact' 3< <(printf '%s\n' "$pw")
 }
 
+# Percent-encode $1 for an smb:// URL; characters in $2 stay as they are.
+urlenc() {
+  local LC_ALL=C s="$1" keep="${2:-}" out="" c i
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    if [[ "$c" == [A-Za-z0-9._~-] || ( -n "$keep" && "$keep" == *"$c"* ) ]]; then out+="$c"
+    else out+="$(printf '%%%02X' "'$c")"; fi
+  done
+  printf '%s' "$out"
+}
+
+# Mount an SMB share with mount_smbfs (macOS), username and password from the entry.
+# URL forms: smb://[user@]host[:port]/share, //host/share. The optional share replaces
+# the share of the URL: a name on the same server, or //host/share.
+smb() {
+  local e="$1" mp="$2" over="${3:-}" url user pw t host share dom="" src
+  command -v mount_smbfs >/dev/null || die "smb: mount_smbfs not found (bm smb works on macOS)"
+  e="$(resolve "$e")"
+  { IFS= read -r url; IFS= read -r user; IFS= read -r pw; } < <(kx show -s -a url -a username -a password "$e")
+  t="${url#smb://}"; t="${t#//}"
+  if [[ -n "$over" ]]; then
+    if [[ "$over" == smb://* || "$over" == //* ]]; then t="${over#smb://}"; t="${t#//}"
+    else t="${t%%/*}/${over#/}"; fi
+  fi
+  [[ "$t" == */* ]] && share="${t#*/}" || share=""
+  t="${t%%/*}"
+  if [[ "$t" == *@* ]]; then [[ -n "$user" ]] || user="${t%%@*}"; t="${t#*@}"; fi
+  host="$t"; share="${share%/}"
+  [[ "$host" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*(:[0-9]+)?$ ]] || die "bad host: $host"
+  [[ -n "$share" ]] || die "no share in $e, give one: bm smb $1 $mp <share>"
+  # DOMAIN\user and DOMAIN;user go to mount_smbfs as DOMAIN;user.
+  if [[ "$user" == *\\* ]]; then dom="${user%%\\*}"; user="${user#*\\}"
+  elif [[ "$user" == *\;* ]]; then dom="${user%%;*}"; user="${user#*;}"; fi
+  src="//"
+  [[ -n "$dom" ]] && src+="$(urlenc "$dom");"
+  [[ -n "$user" ]] && src+="$(urlenc "$user")@"
+  src+="$host/$(urlenc "$share" /)"
+
+  mkdir -p -- "$mp" || die "cannot create $mp"
+  mp="$(cd -- "$mp" && pwd -P)"
+  if mount | grep -qF " on $mp ("; then echo "already mounted: $mp"; return 0; fi
+  # The password goes to expect on fd 3 and from there to the mount_smbfs prompt: it is
+  # not in argv (the URL has no password), not in the environment and not on disk.
+  BM_SRC="$src" BM_MP="$mp" expect -c '
+    set f [open /dev/fd/3]; gets $f pw; close $f
+    set timeout 60
+    spawn -noecho mount_smbfs $env(BM_SRC) $env(BM_MP)
+    expect {
+      -nocase -re {password[^:\n]*: *$} { send -- "$pw\r" }
+      timeout { puts "bm: mount_smbfs did not ask for a password"; exit 1 }
+      eof { exit [lindex [wait] 3] }
+    }
+    expect {
+      -nocase -re {password[^:\n]*: *$} { puts "\nbm: password refused"; exit 1 }
+      timeout { puts "bm: mount timed out"; exit 1 }
+      eof { exit [lindex [wait] 3] }
+    }' 3< <(printf '%s\n' "$pw") || die "smb: cannot mount $src on $mp"
+  echo "mounted $src on $mp"
+}
+
 cmd="${1:-}"; [[ $# -gt 0 ]] && shift
 
 # SSH_ASKPASS mode: answer the first password prompt from the file remote() made, then
@@ -318,6 +380,10 @@ case "$cmd" in
       TARGET="$1"; echo "no entry for $1, using 'default'" >&2
     fi
     remote "$cmd" "$@"
+    ;;
+  smb)
+    [[ -n "${1:-}" && -n "${2:-}" ]] || die "smb: <query> <mountpoint> [share | //host/share]"
+    smb "$@"
     ;;
   ls)
     kx ls -R -f ${1:+"$1"} | grep -v '/$'

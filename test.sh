@@ -116,6 +116,13 @@ cat >"$fake/telnet" <<'EOF'
 #!/bin/bash
 echo "telnet $*"; env >"$(dirname "$0")/telnet.env"; printf 'login: '; read -r u; printf 'Password: '; read -r p; echo "got $u/$p"
 EOF
+cat >"$fake/mount_smbfs" <<'EOF'
+#!/bin/bash
+echo "mount_smbfs $*"; env >"$(dirname "$0")/smb.env"
+printf 'Password for %s: ' "${1#*@}"; read -rs p; echo; echo "got $p"
+EOF
+# mount lists what $fake/mounts holds.
+printf '#!/bin/bash\ncat "%s/mounts" 2>/dev/null; true\n' "$fake" >"$fake/mount"
 cat >"$fake/plink" <<'EOF2'
 #!/bin/bash
 echo "plink $*"; while [[ $# -gt 0 ]]; do [[ "$1" == -pwfile ]] && echo "pw: $(cat "$2")"; shift; done
@@ -194,6 +201,26 @@ out="$(printf '%s\n' "$mp" | "$tbm" plink srv1 2>&1)"
 grep -q 'plink -ssh -agent -P 2222 -l root -pwfile /dev/fd/[0-9]* srv1.lan' <<<"$out" && grep -q 'pw: pw1' <<<"$out" || { echo "FAIL plink: $out"; exit 1; }
 out="$(printf '%s\n' "$mp" | "$tbm" plink -d 10.0.0.7 2>&1)"
 grep -q 'plink -ssh -agent -l ops -pwfile /dev/fd/[0-9]* 10.0.0.7' <<<"$out" && grep -q 'pw: dpw' <<<"$out" || { echo "FAIL plink -d: $out"; exit 1; }
+
+# smb: the password goes to the mount_smbfs prompt, not to argv or the environment.
+# pwd -P: on macOS $TMPDIR is under /var, a link to /private/var.
+mnt="$(cd "$tmp" && pwd -P)/mnt"
+printf '%s\n%s\n%s\n' "$mp" spw spw | ./bm add "smb://dc2.lan/Docs" -t dc2 -u 'CORP\an na' -p >/dev/null
+out="$(printf '%s\n' "$mp" | "$tbm" smb dc2 "$mnt/dc2" 2>&1 | tr -d "\r")"
+grep -q "mount_smbfs //CORP;an%20na@dc2.lan/Docs $mnt/dc2\$" <<<"$out" && grep -q 'got spw' <<<"$out" \
+  && grep -q 'mounted ' <<<"$out" || { echo "FAIL smb: $out"; exit 1; }
+grep -q spw "$fake/smb.env" && { echo "FAIL smb: password in the environment"; exit 1; }
+out="$(printf '%s\n' "$mp" | "$tbm" smb dc2 "$mnt/x" 'Общие/IT' 2>&1 | tr -d "\r")"
+grep -q "@dc2.lan/%D0%9E%D0%B1%D1%89%D0%B8%D0%B5/IT $mnt/x\$" <<<"$out" || { echo "FAIL smb share: $out"; exit 1; }
+out="$(printf '%s\n' "$mp" | "$tbm" smb dc2 "$mnt/y" //fs1.lan/Pub 2>&1 | tr -d "\r")"
+grep -q "@fs1.lan/Pub $mnt/y\$" <<<"$out" || { echo "FAIL smb //host/share: $out"; exit 1; }
+echo "//x@dc2.lan/Docs on $mnt/dc2 (smbfs, nodev)" >"$fake/mounts"
+out="$(printf '%s\n' "$mp" | "$tbm" smb dc2 "$mnt/dc2" 2>&1 | tr -d "\r")"
+grep -q 'already mounted' <<<"$out" && ! grep -q 'mount_smbfs' <<<"$out" || { echo "FAIL smb mounted: $out"; exit 1; }
+for s in //-oX/Docs '//h;rm/Docs'; do
+  out="$(printf '%s\n' "$mp" | "$tbm" smb dc2 "$mnt/z" "$s" 2>&1 | tr -d "\r")" && { echo "FAIL smb bad host $s: $out"; exit 1; }
+  grep -q 'bad host' <<<"$out" || { echo "FAIL smb bad host $s: $out"; exit 1; }
+done
 
 # Keychain + Touch ID cache, without a Touch ID dialog: NONINTERACTIVE makes the
 # helper fail instead of asking. A valid cache needs one real Touch ID (its HMAC key is
